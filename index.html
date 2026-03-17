@@ -821,16 +821,23 @@ async function renderDashBody(dateKey){
           <i class="fas fa-sync mr-1"></i>รีเฟรช
         </button>
       </div>
-      <button onclick="exportDashExcel('${dateKey}')"
-        class="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition shadow-sm">
-        <i class="fas fa-file-excel"></i> Export Excel
-      </button>
+      <div class="flex gap-2 flex-wrap">
+        ${CU.role==='admin'?`<button onclick="adminCheckInFor('${dateKey}')"
+          class="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg text-sm font-medium transition shadow-sm">
+          <i class="fas fa-user-check"></i> เช็คชื่อให้พนักงาน
+        </button>`:''}
+        <button onclick="exportDashExcel('${dateKey}')"
+          class="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition shadow-sm">
+          <i class="fas fa-file-excel"></i> Export Excel
+        </button>
+      </div>
     </div>
     <div class="overflow-x-auto">
       <table class="min-w-full text-sm">
-        ${THead('เวลา','ชื่อพนักงาน','สายงาน','หัวหน้า','OT (ชม.)','ค่าแรง','ค่า OT','รวม','GPS','วิธี')}
-        <tbody>${records.length===0?EmptyR(10):records.map(r=>`<tr class="hover:bg-blue-50">
+        ${THead('เวลาเข้า','เวลาออก','ชื่อพนักงาน','สายงาน','หัวหน้า','OT','ค่าแรง','ค่า OT','รวม','GPS','วิธี',...(CU.role==='admin'?['จัดการ']:[]))}
+        <tbody>${records.length===0?EmptyR(CU.role==='admin'?12:11):records.map(r=>`<tr class="hover:bg-blue-50">
           <td class="px-4 py-2 font-mono text-sm">${r.checkInTime}</td>
+          <td class="px-4 py-2 font-mono text-sm ${r.checkOutTime?'text-red-600':'text-gray-300'}">${r.checkOutTime||'—'}</td>
           <td class="px-4 py-2 font-medium">${r.empName}</td>
           <td class="px-4 py-2 text-gray-500">${r.dept}</td>
           <td class="px-4 py-2 text-gray-500">${r.sup}</td>
@@ -840,14 +847,17 @@ async function renderDashBody(dateKey){
           <td class="px-4 py-2 text-right font-bold text-blue-700">฿${r.total.toLocaleString()}</td>
           <td class="px-4 py-2">${r.gpsOk?bdg('green','✓ตรงจุด'):bdg('red','✗นอก')}</td>
           <td class="px-4 py-2">${r.checkInMethod==='face'?bdg('purple','😊ใบหน้า'):bdg('blue','QR')}</td>
+          ${CU.role==='admin'?`<td class="px-4 py-2 whitespace-nowrap">
+            <button onclick="adminEditAttendance('${dateKey}',${JSON.stringify(r).replace(/"/g,'&quot;')})" class="text-blue-600 text-xs hover:underline mr-2"><i class="fas fa-edit"></i> แก้ไข</button>
+          </td>`:''}
         </tr>`).join('')}</tbody>
         ${records.length>0?`<tfoot class="bg-gray-50 font-bold"><tr>
-          <td colspan="4" class="px-4 py-2 text-right text-sm text-gray-600">รวม</td>
+          <td colspan="5" class="px-4 py-2 text-right text-sm text-gray-600">รวม</td>
           <td class="px-4 py-2 text-center text-sm">${records.reduce((s,r)=>s+r.otHours,0).toFixed(1)}</td>
           <td class="px-4 py-2 text-right text-sm">฿${records.reduce((s,r)=>s+r.wage,0).toLocaleString()}</td>
           <td class="px-4 py-2 text-right text-sm">฿${records.reduce((s,r)=>s+r.otPay,0).toLocaleString()}</td>
           <td class="px-4 py-2 text-right text-sm text-blue-700">฿${tWage.toLocaleString()}</td>
-          <td></td><td></td>
+          <td></td><td></td>${CU.role==='admin'?'<td></td>':''}
         </tr></tfoot>`:''}
       </table>
     </div>`);
@@ -2219,7 +2229,7 @@ function _renderCheckinReady(wrap, empObj) {
     </button>`:''}
     ${(checkinMode==='face'||checkinMode==='both')?`
     <button id="btn-face" onclick="openFaceScan()"
-      style="width:100%;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;border:none;border-radius:20px;padding:26px 20px;font-size:22px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:14px;font-family:Sarabun,sans-serif;box-shadow:0 6px 20px rgba(124,58,237,.35);margin-bottom:16px;transition:opacity .15s;"
+      style="width:100%;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none;border-radius:20px;padding:26px 20px;font-size:22px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:14px;font-family:Sarabun,sans-serif;box-shadow:0 6px 20px rgba(22,163,74,.35);margin-bottom:16px;transition:opacity .15s;"
       onmousedown="this.style.opacity='.85'" onmouseup="this.style.opacity='1'" ontouchstart="this.style.opacity='.85'" ontouchend="this.style.opacity='1'">
       <i class="fas fa-smile" style="font-size:26px;"></i>
       สแกนใบหน้าเข้างาน
@@ -2376,7 +2386,7 @@ function _renderCheckinDone(wrap, empObj, alr) {
             </button>`:''}
             ${(checkinMode==='face'||checkinMode==='both')?`
             <button id="btn-face-checkout" onclick="openFaceScanCheckout()"
-              style="width:100%;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;border:none;border-radius:14px;padding:16px 20px;font-size:17px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:12px;font-family:Sarabun,sans-serif;transition:opacity .15s;"
+              style="width:100%;background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;border:none;border-radius:14px;padding:16px 20px;font-size:17px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:12px;font-family:Sarabun,sans-serif;transition:opacity .15s;"
               onmousedown="this.style.opacity='.85'" onmouseup="this.style.opacity='1'" ontouchstart="this.style.opacity='.85'" ontouchend="this.style.opacity='1'">
               <i class="fas fa-smile" style="font-size:20px;"></i> สแกนใบหน้าออกงาน
             </button>`:''}
@@ -2876,30 +2886,171 @@ async function renderEmpHome(){
   const tr=getAttendanceArray(todayStr).find(r=>r.empId===e._key);
   const thisMonth=todayStr.slice(0,7);
   await loadAttendanceMonth(thisMonth);
-  const mD=Object.entries(db.attendance).filter(([k])=>k.startsWith(thisMonth)).reduce((s,[,b])=>s+Object.values(b||{}).filter(r=>r.empId===e._key).length,0);
-  const mW=Object.entries(db.attendance).filter(([k])=>k.startsWith(thisMonth)).reduce((s,[,b])=>s+Object.values(b||{}).filter(r=>r.empId===e._key).reduce((ss,r)=>ss+r.total,0),0);
+  const monthRecs=[];
+  Object.entries(db.attendance).forEach(([k,bucket])=>{
+    if(!k.startsWith(thisMonth))return;
+    const r=Object.values(bucket||{}).find(x=>x.empId===e._key);
+    if(r)monthRecs.push({...r,dk:k});
+  });
+  monthRecs.sort((a,b)=>a.dk.localeCompare(b.dk));
+  const mD=monthRecs.length;
+  const mW=monthRecs.reduce((s,r)=>s+r.total,0);
+  const mOT=monthRecs.reduce((s,r)=>s+r.otPay,0);
   const el=document.getElementById('emp-home-body');if(!el)return;
-  el.innerHTML=`<div class="max-w-md mx-auto space-y-4">
-    <div class="bg-white rounded-xl shadow-sm p-5 border-t-4 border-green-500">
-      <div class="flex items-center gap-3 mb-4">
-        <div class="w-12 h-12 rounded-full bg-green-100 text-green-700 flex items-center justify-center font-bold text-xl">${e.name[0]}</div>
-        <div><div class="font-bold text-gray-800">${e.name}</div><div class="text-xs text-gray-400">${e.dept||'-'}</div></div>
+
+  const cardStyle=(color,cursor='pointer')=>`background:#fff;border-radius:16px;box-shadow:0 1px 8px rgba(0,0,0,.07);border-left:4px solid ${color};padding:16px 18px;cursor:${cursor};transition:box-shadow .2s,transform .15s;`;
+  const cardHover=`onmouseover="this.style.boxShadow='0 4px 16px rgba(0,0,0,.12)';this.style.transform='translateY(-2px)'" onmouseout="this.style.boxShadow='0 1px 8px rgba(0,0,0,.07)';this.style.transform='translateY(0)'"`;
+
+  el.innerHTML=`<div style="max-width:440px;margin:0 auto;">
+
+    <!-- Profile card -->
+    <div style="background:linear-gradient(135deg,#1e3a5f,#0f172a);border-radius:20px;padding:22px;margin-bottom:16px;color:#fff;">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
+        <div style="width:52px;height:52px;border-radius:50%;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;border:2px solid rgba(255,255,255,.3);">${e.name[0]}</div>
+        <div>
+          <div style="font-size:18px;font-weight:700;">${e.name}</div>
+          <div style="font-size:12px;opacity:.7;margin-top:2px;">${e.dept||'-'} · ${(e.sup||'-')}</div>
+        </div>
       </div>
-      <div class="grid grid-cols-2 gap-3">
-        ${StatCard('วันนี้',tr?'✓ เช็คแล้ว':'ยังไม่ได้เช็ค','fa-calendar-check',tr?'green':'yellow')}
-        ${StatCard('เดือนนี้',mD+' วัน','fa-calendar-alt','blue')}
-        ${StatCard('ค่าแรงเดือนนี้','฿'+mW.toLocaleString(),'fa-coins','purple')}
-        ${StatCard('หัวหน้า',(e.sup||'-').replace('นาย ','').replace('นาง ',''),'fa-user-tie','blue')}
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+        <div style="background:rgba(255,255,255,.1);border-radius:12px;padding:12px;text-align:center;">
+          <div style="font-size:20px;font-weight:700;">${mD}</div>
+          <div style="font-size:10px;opacity:.7;margin-top:2px;">วันทำงาน</div>
+        </div>
+        <div style="background:rgba(255,255,255,.1);border-radius:12px;padding:12px;text-align:center;">
+          <div style="font-size:16px;font-weight:700;">฿${Math.round(mW/1000)}k</div>
+          <div style="font-size:10px;opacity:.7;margin-top:2px;">ค่าแรงเดือน</div>
+        </div>
+        <div style="background:rgba(255,255,255,.1);border-radius:12px;padding:12px;text-align:center;">
+          <div style="font-size:16px;font-weight:700;">฿${mOT>0?Math.round(mOT/1000)+'k':'-'}</div>
+          <div style="font-size:10px;opacity:.7;margin-top:2px;">OT เดือน</div>
+        </div>
       </div>
     </div>
-    ${tr?`<div class="bg-green-50 border border-green-200 rounded-xl p-5 text-center">
-      <div class="text-green-700 font-bold text-lg">✅ เช็คชื่อแล้ว ${tr.checkInTime}</div>
-      <div class="text-sm text-green-600 mt-1">ค่าแรงวันนี้: ฿${tr.total.toLocaleString()}</div>
-    </div>`:`<button onclick="(function(){const isMob=document.getElementById('app-screen').classList.contains('mobile-mode');const btn=isMob?document.querySelector('[data-mob-tab=checkin-page]'):document.querySelector('[data-tab=checkin-page]');if(btn)goTab('checkin-page',btn);})()" class="w-full bg-green-600 hover:bg-green-700 text-white py-4 rounded-xl font-bold text-lg shadow-sm">
-      📷 เช็คชื่อเข้างานวันนี้
-    </button>`}
+
+    <!-- Today status card (clickable) -->
+    <div onclick="showEmpTodayDetail()" ${cardHover}
+      style="${cardStyle(tr?'#16a34a':'#f59e0b')}margin-bottom:12px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div>
+          <div style="font-size:11px;color:#64748b;margin-bottom:4px;">วันนี้ — ${new Date().toLocaleDateString('th-TH',{weekday:'long',day:'numeric',month:'long'})}</div>
+          ${tr
+            ? `<div style="font-size:17px;font-weight:700;color:#16a34a;">✅ เช็คชื่อแล้ว ${tr.checkInTime} น.</div>
+               <div style="font-size:12px;color:#4ade80;margin-top:3px;">
+                 ค่าแรงวันนี้ ฿${tr.total.toLocaleString()} · ${tr.checkOutTime?'ออก '+tr.checkOutTime+' น.':'ยังไม่ได้ออก'}
+               </div>`
+            : `<div style="font-size:17px;font-weight:700;color:#d97706;">⏰ ยังไม่ได้เช็คชื่อ</div>
+               <div style="font-size:12px;color:#92400e;margin-top:3px;">คลิกเพื่อดูรายละเอียด</div>`}
+        </div>
+        <i class="fas fa-chevron-right" style="color:#cbd5e1;font-size:16px;"></i>
+      </div>
+    </div>
+
+    <!-- Monthly stat card (clickable → go to history) -->
+    <div onclick="(function(){const isMob=document.getElementById('app-screen').classList.contains('mobile-mode');const btn=isMob?document.querySelector('[data-mob-tab=emp-hist]'):document.querySelector('[data-tab=emp-hist]');if(btn)goTab('emp-hist',btn);})()" ${cardHover}
+      style="${cardStyle('#3b82f6')}margin-bottom:12px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div>
+          <div style="font-size:11px;color:#64748b;margin-bottom:4px;">สรุปเดือนนี้</div>
+          <div style="font-size:17px;font-weight:700;color:#1e40af;">${mD} วัน · ฿${mW.toLocaleString()}</div>
+          <div style="font-size:12px;color:#60a5fa;margin-top:3px;">คลิกดูประวัติทั้งหมด →</div>
+        </div>
+        <i class="fas fa-calendar-alt" style="color:#93c5fd;font-size:22px;"></i>
+      </div>
+    </div>
+
+    <!-- Recent days mini list -->
+    ${monthRecs.length ? `
+    <div style="background:#fff;border-radius:16px;box-shadow:0 1px 8px rgba(0,0,0,.07);overflow:hidden;margin-bottom:16px;">
+      <div style="padding:14px 18px;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-weight:700;font-size:13px;color:#1e293b;">บันทึกล่าสุด</div>
+        <span style="font-size:11px;color:#64748b;">${Math.min(5,monthRecs.length)} รายการล่าสุด</span>
+      </div>
+      ${[...monthRecs].reverse().slice(0,5).map(r=>`
+        <div onclick="showEmpDayDetail(${JSON.stringify({dk:r.dk,checkInTime:r.checkInTime,checkOutTime:r.checkOutTime||'',dept:r.dept,gpsOk:r.gpsOk,wage:r.wage,otPay:r.otPay,total:r.total,checkInMethod:r.checkInMethod||'QR'}).replace(/"/g,'&quot;')})"
+          style="padding:12px 18px;border-bottom:1px solid #f8fafc;cursor:pointer;display:flex;justify-content:space-between;align-items:center;transition:background .15s;"
+          onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:#1e293b;">${fmtThai(r.dk)}</div>
+            <div style="font-size:11px;color:#64748b;margin-top:2px;">
+              <i class="fas fa-sign-in-alt" style="color:#16a34a;margin-right:3px;font-size:9px;"></i>${r.checkInTime}
+              ${r.checkOutTime?`<i class="fas fa-sign-out-alt" style="color:#dc2626;margin:0 3px;font-size:9px;"></i>${r.checkOutTime}`:''}
+            </div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-weight:700;color:#16a34a;font-size:14px;">฿${r.total.toLocaleString()}</div>
+            <div>${r.gpsOk?'<span style="font-size:10px;background:#dcfce7;color:#166534;padding:1px 6px;border-radius:6px;">✓GPS</span>':'<span style="font-size:10px;background:#fee2e2;color:#991b1b;padding:1px 6px;border-radius:6px;">✗GPS</span>'}</div>
+          </div>
+        </div>`).join('')}
+    </div>` : ''}
+
+    <!-- Checkin CTA if not checked -->
+    ${!tr?`<button onclick="(function(){const isMob=document.getElementById('app-screen').classList.contains('mobile-mode');const btn=isMob?document.querySelector('[data-mob-tab=checkin-page]'):document.querySelector('[data-tab=checkin-page]');if(btn)goTab('checkin-page',btn);})()"
+      style="width:100%;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none;border-radius:16px;padding:18px;font-size:17px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;box-shadow:0 4px 14px rgba(22,163,74,.3);">
+      <i class="fas fa-clock" style="margin-right:8px;"></i>เช็คชื่อเข้างานวันนี้
+    </button>`:''}
   </div>`;
 }
+
+window.showEmpTodayDetail = async function() {
+  const e = db.employees.find(x=>x._key===CU.id); if(!e) return;
+  await loadAttendanceDate(todayStr);
+  const tr = getAttendanceArray(todayStr).find(r=>r.empId===e._key);
+  if (!tr) {
+    openModal('สถานะวันนี้', `<div style="text-align:center;padding:16px;">
+      <div style="font-size:40px;margin-bottom:12px;">⏰</div>
+      <div style="font-weight:700;color:#d97706;font-size:16px;">ยังไม่ได้เช็คชื่อวันนี้</div>
+      <div style="font-size:13px;color:#64748b;margin-top:8px;">${new Date().toLocaleDateString('th-TH',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div>
+    </div>`,
+    `<button onclick="closeModal();(function(){const isMob=document.getElementById('app-screen').classList.contains('mobile-mode');const btn=isMob?document.querySelector('[data-mob-tab=checkin-page]'):document.querySelector('[data-tab=checkin-page]');if(btn)goTab('checkin-page',btn);})()" class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2.5 rounded-lg text-sm font-bold">เช็คชื่อเลย</button>
+     <button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-4 py-2.5 rounded-lg text-sm font-medium">ปิด</button>`);
+    return;
+  }
+  const calcHrs = (i,o) => { if(!i||!o) return '-'; const [ih,im]=i.split(':').map(Number),[oh,om]=o.split(':').map(Number),m=(oh*60+om)-(ih*60+im); return m>0?(m/60).toFixed(2)+' ชม.':'-'; };
+  const body = `<div style="space-y:12px;">
+    <div style="background:#f0fdf4;border-radius:12px;padding:16px;margin-bottom:12px;text-align:center;">
+      <div style="font-size:13px;color:#166534;font-weight:600;">✅ เช็คชื่อสำเร็จ</div>
+      <div style="font-size:28px;font-weight:700;color:#16a34a;font-family:monospace;margin-top:4px;">${tr.checkInTime}</div>
+    </div>
+    ${[
+      ['วันที่',fmtThai(todayStr)],['สายงาน',tr.dept||'-'],['หัวหน้างาน',tr.sup||'-'],
+      ['วิธีเช็คชื่อ',tr.checkInMethod==='face'?'😊 สแกนใบหน้า':'📱 QR Code'],
+      ['GPS เข้างาน',tr.gpsOk?'✓ อยู่ในพื้นที่':'✗ นอกพื้นที่'],
+      ['เวลาออกงาน',tr.checkOutTime||'ยังไม่ได้ออก'],
+      ...(tr.checkOutTime?[['GPS ออกงาน',tr.checkOutGps?'✓ อยู่ในพื้นที่':'✗ นอกพื้นที่'],['ชม.ทำงาน',calcHrs(tr.checkInTime,tr.checkOutTime)]]:[] ),
+      ['ค่าแรง','฿'+tr.wage.toLocaleString()],
+      ['ค่า OT',tr.otPay>0?'฿'+tr.otPay.toLocaleString():'-'],
+      ['รวมวันนี้','฿'+tr.total.toLocaleString()],
+    ].map(([k,v])=>`
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f1f5f9;font-size:13px;">
+        <span style="color:#64748b;">${k}</span>
+        <span style="font-weight:600;color:#1e293b;">${v}</span>
+      </div>`).join('')}
+  </div>`;
+  openModal(`สถานะวันนี้ — ${tr.empName}`, body, `<button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-5 py-2.5 rounded-lg text-sm font-medium">ปิด</button>`);
+};
+
+window.showEmpDayDetail = function(dataStr) {
+  let r; try { r = typeof dataStr==='string' ? JSON.parse(dataStr.replace(/&quot;/g,'"')) : dataStr; } catch(e){ return; }
+  const calcHrs = (i,o) => { if(!i||!o) return '-'; const [ih,im]=i.split(':').map(Number),[oh,om]=o.split(':').map(Number),m=(oh*60+om)-(ih*60+im); return m>0?(m/60).toFixed(2)+' ชม.':'-'; };
+  const body = `<div>
+    ${[
+      ['วันที่',r.dk?fmtThai(r.dk):'-'],['สายงาน',r.dept||'-'],
+      ['เวลาเข้า',r.checkInTime||'-'],['เวลาออก',r.checkOutTime||'ยังไม่ได้ออก'],
+      ['ชม.ทำงาน',calcHrs(r.checkInTime,r.checkOutTime)],
+      ['วิธี',r.checkInMethod==='face'?'😊 ใบหน้า':'📱 QR'],
+      ['GPS',r.gpsOk?'✓ อยู่ในพื้นที่':'✗ นอกพื้นที่'],
+      ['ค่าแรง','฿'+(r.wage||0).toLocaleString()],
+      ['ค่า OT',r.otPay>0?'฿'+r.otPay.toLocaleString():'-'],
+      ['รวม','฿'+(r.total||0).toLocaleString()],
+    ].map(([k,v])=>`
+      <div style="display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1f5f9;font-size:13px;">
+        <span style="color:#64748b;">${k}</span>
+        <span style="font-weight:600;color:#1e293b;">${v}</span>
+      </div>`).join('')}
+  </div>`;
+  openModal('รายละเอียดการทำงาน', body, `<button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-5 py-2.5 rounded-lg text-sm font-medium">ปิด</button>`);
+};
 
 function pgEmpHist(){
   const mc=document.getElementById('main-content');
@@ -3944,6 +4095,209 @@ window.doAdminUnlockFace = async function(empKey) {
   hideSync();
   closeModal();
   alert('✅ ปลดล็อคสำเร็จ พนักงานสามารถลงทะเบียนใบหน้าได้อีกครั้ง');
+};
+
+// =====================================================================
+//  ADMIN EDIT ATTENDANCE
+// =====================================================================
+window.adminEditAttendance = function(dateKey, rec) {
+  // Find Firebase key
+  const bucket = db.attendance[dateKey] || {};
+  const fbKey  = Object.entries(bucket).find(([,v]) => v.empId === rec.empId && v.checkInTime === rec.checkInTime)?.[0];
+  if (!fbKey) { alert('ไม่พบข้อมูลใน Firebase'); return; }
+
+  const w = db.wage;
+  const calcTotal = (wage, ot, otRate) => wage + (ot * otRate);
+
+  const body = `
+    <div style="background:#eff6ff;border-radius:12px;padding:12px 16px;margin-bottom:16px;font-size:13px;">
+      <div style="font-weight:700;color:#1e40af;">${rec.empName}</div>
+      <div style="color:#3b82f6;margin-top:2px;">${rec.dept} · ${fmtThai(dateKey)}</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:14px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:5px;">
+            <i class="fas fa-sign-in-alt" style="color:#16a34a;margin-right:4px;"></i>เวลาเข้างาน
+          </label>
+          <input id="ea-in" type="time" value="${rec.checkInTime||''}"
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:9px 12px;font-size:14px;font-family:Sarabun,sans-serif;box-sizing:border-box;">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:5px;">
+            <i class="fas fa-sign-out-alt" style="color:#dc2626;margin-right:4px;"></i>เวลาออกงาน
+          </label>
+          <input id="ea-out" type="time" value="${rec.checkOutTime||''}"
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:9px 12px;font-size:14px;font-family:Sarabun,sans-serif;box-sizing:border-box;">
+          <div style="font-size:11px;color:#94a3b8;margin-top:3px;">เว้นว่างไว้ = ยังไม่ได้ออก</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:5px;">OT (ชั่วโมง)</label>
+          <input id="ea-ot" type="number" min="0" max="12" step="0.5" value="${rec.otHours||0}"
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:9px 12px;font-size:14px;font-family:Sarabun,sans-serif;box-sizing:border-box;">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:5px;">ค่าแรง/วัน (฿)</label>
+          <input id="ea-wage" type="number" value="${rec.wage||w.defaultWage}"
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:9px 12px;font-size:14px;font-family:Sarabun,sans-serif;box-sizing:border-box;">
+        </div>
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:5px;">หมายเหตุ (ไม่บังคับ)</label>
+        <input id="ea-note" type="text" value="${rec.adminNote||''}" placeholder="เช่น แก้ไขโดย admin เนื่องจาก..."
+          style="width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:9px 12px;font-size:13px;font-family:Sarabun,sans-serif;box-sizing:border-box;">
+      </div>
+      <!-- Danger zone -->
+      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:14px;">
+        <div style="font-size:12px;font-weight:700;color:#dc2626;margin-bottom:10px;">
+          <i class="fas fa-exclamation-triangle" style="margin-right:5px;"></i>โซนอันตราย
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <button onclick="adminClearCheckout('${dateKey}','${fbKey}','${rec.empName}')"
+            style="background:#fff;border:1.5px solid #fca5a5;color:#dc2626;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:Sarabun,sans-serif;">
+            <i class="fas fa-clock" style="margin-right:4px;"></i>ยกเลิกเวลาออก
+          </button>
+          <button onclick="adminDeleteAttendance('${dateKey}','${fbKey}','${rec.empName}')"
+            style="background:#dc2626;border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:Sarabun,sans-serif;">
+            <i class="fas fa-trash" style="margin-right:4px;"></i>ลบบันทึกนี้
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+  const footer = `
+    <button onclick="adminSaveAttendance('${dateKey}','${fbKey}','${rec.empId}',${w.otRate||75})"
+      class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-lg text-sm font-bold">
+      <i class="fas fa-save mr-1"></i>บันทึกการแก้ไข
+    </button>
+    <button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-5 py-2.5 rounded-lg text-sm font-medium">ยกเลิก</button>`;
+
+  openModal(`แก้ไขการลงเวลา — ${rec.empName}`, body, footer);
+};
+
+window.adminSaveAttendance = async function(dateKey, fbKey, empId, otRate) {
+  const inT  = document.getElementById('ea-in').value;
+  const outT = document.getElementById('ea-out').value;
+  const ot   = parseFloat(document.getElementById('ea-ot').value) || 0;
+  const wage = parseInt(document.getElementById('ea-wage').value) || 0;
+  const note = document.getElementById('ea-note').value.trim();
+  if (!inT) return alert('กรุณากรอกเวลาเข้างาน');
+  const otPay  = Math.round(ot * otRate);
+  const total  = wage + otPay;
+  const patch = {
+    checkInTime: inT, otHours: ot, wage, otPay, total,
+    adminNote: note, adminEditBy: CU.displayName, adminEditAt: Date.now(),
+    ...(outT ? { checkOutTime: outT } : {}),
+    ...(!outT && { checkOutTime: null })
+  };
+  // Remove null if outT is empty
+  if (!outT) { delete patch.checkOutTime; patch.checkOutTime = ''; }
+  showSync();
+  await fbPatch(`/attendance/${dateKey}/${fbKey}`, patch);
+  if (db.attendance[dateKey] && db.attendance[dateKey][fbKey]) {
+    Object.assign(db.attendance[dateKey][fbKey], patch);
+  }
+  hideSync();
+  closeModal();
+  renderDashBody(dateKey);
+  alert(`✅ บันทึกสำเร็จ\nเวลาเข้า: ${inT} · เวลาออก: ${outT||'—'} · รวม: ฿${total.toLocaleString()}`);
+};
+
+window.adminClearCheckout = async function(dateKey, fbKey, name) {
+  if (!confirm(`ยกเลิกเวลาออกของ ${name}?\nพนักงานจะต้องสแกนออกใหม่`)) return;
+  showSync();
+  await fbPatch(`/attendance/${dateKey}/${fbKey}`, { checkOutTime: '', checkOutGps: null, checkOutDist: null });
+  if (db.attendance[dateKey]?.[fbKey]) {
+    db.attendance[dateKey][fbKey].checkOutTime = '';
+    db.attendance[dateKey][fbKey].checkOutGps  = null;
+  }
+  hideSync();
+  closeModal();
+  renderDashBody(dateKey);
+};
+
+window.adminDeleteAttendance = async function(dateKey, fbKey, name) {
+  if (!confirm(`⚠️ ลบบันทึกการเข้างานของ ${name} วันนี้ออกทั้งหมด?\nไม่สามารถกู้คืนได้`)) return;
+  showSync();
+  await fbDelete(`/attendance/${dateKey}/${fbKey}`);
+  if (db.attendance[dateKey]) delete db.attendance[dateKey][fbKey];
+  hideSync();
+  closeModal();
+  renderDashBody(dateKey);
+};
+
+// Admin เช็คชื่อให้พนักงานจากหน้า Dashboard (กรณีลืมสแกน)
+window.adminCheckInFor = async function(dateKey) {
+  const empOpts = [{v:'',l:'-- เลือกพนักงาน --'},...db.employees.map(e=>({v:e._key,l:e.name+' ('+e.dept+')'}))] ;
+  const already = new Set(getAttendanceArray(dateKey).map(r=>r.empId));
+  const avail  = db.employees.filter(e=>!already.has(e._key));
+  if (!avail.length) { alert('พนักงานทุกคนเช็คชื่อแล้ว'); return; }
+  const opts = [{v:'',l:'-- เลือกพนักงาน --'},...avail.map(e=>({v:e._key,l:e.name+' ('+e.dept+')'}))] ;
+  const body = `
+    <div style="display:flex;flex-direction:column;gap:14px;">
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:5px;">พนักงาน *</label>
+        ${Sel('aci-emp', opts)}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:5px;">เวลาเข้างาน *</label>
+          <input id="aci-in" type="time" value="${db.wage.workStart||'07:00'}"
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:9px 12px;font-size:14px;font-family:Sarabun,sans-serif;box-sizing:border-box;">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:5px;">เวลาออกงาน</label>
+          <input id="aci-out" type="time" value=""
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:9px 12px;font-size:14px;font-family:Sarabun,sans-serif;box-sizing:border-box;">
+          <div style="font-size:11px;color:#94a3b8;margin-top:3px;">เว้นว่างไว้ได้</div>
+        </div>
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:5px;">OT (ชม.)</label>
+        <input id="aci-ot" type="number" min="0" max="12" step="0.5" value="0"
+          style="width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:9px 12px;font-size:14px;font-family:Sarabun,sans-serif;box-sizing:border-box;">
+      </div>
+      <div style="background:#fef9c3;border-radius:10px;padding:10px 12px;font-size:12px;color:#854d0e;">
+        <i class="fas fa-info-circle" style="margin-right:4px;"></i>
+        ระบบจะบันทึกว่า "เช็คชื่อโดย Admin" — ใช้เมื่อพนักงานลืมสแกน
+      </div>
+    </div>`;
+  const footer = `
+    <button onclick="adminDoCheckInFor('${dateKey}')"
+      class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2.5 rounded-lg text-sm font-bold">
+      <i class="fas fa-user-check mr-1"></i>เช็คชื่อให้พนักงาน
+    </button>
+    <button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-5 py-2.5 rounded-lg text-sm font-medium">ยกเลิก</button>`;
+  openModal(`เช็คชื่อให้พนักงาน — ${fmtThai(dateKey)}`, body, footer);
+};
+
+window.adminDoCheckInFor = async function(dateKey) {
+  const empKey = document.getElementById('aci-emp').value;
+  const inT    = document.getElementById('aci-in').value;
+  const outT   = document.getElementById('aci-out').value;
+  const ot     = parseFloat(document.getElementById('aci-ot').value) || 0;
+  if (!empKey) return alert('กรุณาเลือกพนักงาน');
+  if (!inT)    return alert('กรุณากรอกเวลาเข้างาน');
+  const emp = db.employees.find(e=>e._key===empKey); if(!emp) return;
+  const wage   = emp.wage || db.wage.defaultWage;
+  const otPay  = Math.round(ot * (db.wage.otRate||75));
+  const rec = {
+    empId: emp._key, empName: emp.name, dept: emp.dept, sup: emp.sup, supId: emp.supId||'',
+    checkInTime: inT, otHours: ot, wage, otPay, total: wage+otPay,
+    gpsOk: true, distMeters: 0, timestamp: Date.now(),
+    checkInMethod: 'admin', adminEditBy: CU.displayName,
+    ...(outT ? { checkOutTime: outT, checkOutGps: true } : {})
+  };
+  showSync();
+  const res = await fbPush(`/attendance/${dateKey}`, rec);
+  if (!db.attendance[dateKey]) db.attendance[dateKey] = {};
+  db.attendance[dateKey][res.name] = rec;
+  hideSync();
+  closeModal();
+  renderDashBody(dateKey);
+  alert(`✅ เช็คชื่อให้ ${emp.name} สำเร็จ · เวลาเข้า ${inT}${outT?' · ออก '+outT:''}`);
 };
 
 // =====================================================================
