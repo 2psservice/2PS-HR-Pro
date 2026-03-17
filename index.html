@@ -1125,12 +1125,146 @@ window.delSup=async id=>{
 function pgEmps(filterSupKey=''){
   const mc=document.getElementById('main-content');
   const emps=filterSupKey?db.employees.filter(e=>e.supId===filterSupKey):db.employees;
-  mc.innerHTML=card(sHead('รายชื่อพนักงาน',`<div class="flex gap-2">
+  mc.innerHTML=card(sHead('รายชื่อพนักงาน',`<div class="flex gap-2 flex-wrap">
     <input type="text" id="esrch" placeholder="ค้นหา..." class="border rounded-lg px-3 py-2 text-sm w-36 focus:outline-none focus:ring-1" oninput="filterEmps(this.value,'${filterSupKey}')">
+    ${!filterSupKey?`
+    <button onclick="downloadEmpTemplate()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg text-sm flex items-center gap-1.5 border"><i class="fas fa-download text-green-600"></i>Template</button>
+    <label class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg text-sm flex items-center gap-1.5 cursor-pointer shadow-sm"><i class="fas fa-upload"></i>Import Excel<input type="file" accept=".xlsx,.xls" style="display:none" onchange="importEmpExcel(this)"></label>`:''}
     ${Btn('<i class="fas fa-plus mr-1"></i>เพิ่มพนักงาน','openEmpMod(null)')}</div>`)
     +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','เบอร์','สายงาน','หัวหน้า','ค่าแรง','Username','จัดการ')}
     <tbody id="emp-tbody">${empRows(emps)}</tbody></table></div>`);
 }
+
+// ---- Download Template Excel ----
+window.downloadEmpTemplate = function() {
+  const wb = XLSX.utils.book_new();
+  const headers = ['รหัส(ไม่บังคับ)','ชื่อ-นามสกุล*','เบอร์โทร','สายงาน*','หัวหน้างาน(ชื่อ)*','ค่าแรง/วัน','Username*','รหัสผ่าน*'];
+  const note   = ['','หมายเหตุ: * = จำเป็น | ชื่อหัวหน้าต้องตรงกับระบบ | สายงานต้องตรงกับที่กำหนดไว้','','','','','',''];
+  const supEx  = db.supervisors.length ? db.supervisors[0].name : 'ชื่อหัวหน้างาน';
+  const deptEx = db.departments.length ? db.departments[0].name : 'สายงาน';
+  const ex1    = ['','นายสมชาย ใจดี','081-234-5678',deptEx,supEx,'400','somchai','1234'];
+  const ex2    = ['','นางสมหญิง รักงาน','082-345-6789',deptEx,supEx,'450','somying','1234'];
+
+  // Sheet 1: Template
+  const ws = XLSX.utils.aoa_to_sheet([headers, note, [], ex1, ex2]);
+  ws['!cols'] = [{wch:16},{wch:24},{wch:14},{wch:18},{wch:22},{wch:12},{wch:14},{wch:12}];
+  // Highlight header row
+  XLSX.utils.book_append_sheet(wb, ws, 'พนักงาน');
+
+  // Sheet 2: Ref — supervisor list
+  const supData = [['ชื่อหัวหน้างาน','สายงาน','Username'],...db.supervisors.map(s=>[s.name,s.dept||'-',s.username])];
+  const ws2 = XLSX.utils.aoa_to_sheet(supData);
+  ws2['!cols'] = [{wch:24},{wch:18},{wch:16}];
+  XLSX.utils.book_append_sheet(wb, ws2, 'หัวหน้างาน (อ้างอิง)');
+
+  // Sheet 3: Ref — department list
+  const deptData = [['ชื่อสายงาน'],...db.departments.map(d=>[d.name])];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(deptData), 'สายงาน (อ้างอิง)');
+
+  XLSX.writeFile(wb, 'employee_template.xlsx');
+};
+
+// ---- Import Employee Excel ----
+window.importEmpExcel = async function(input) {
+  const file = input.files[0]; if (!file) return;
+  input.value = '';
+  const reader = new FileReader();
+  reader.onload = async e => {
+    const data = new Uint8Array(e.target.result);
+    const wb   = XLSX.read(data, { type: 'array' });
+    const ws   = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    if (rows.length < 2) return alert('ไฟล์ว่างหรือไม่มีข้อมูล');
+
+    // Find header row (row with ชื่อ-นามสกุล)
+    let dataStart = 1;
+    for (let i = 0; i < Math.min(5, rows.length); i++) {
+      if (rows[i].some(c => String(c).includes('ชื่อ-นามสกุล') || String(c).includes('ชื่อ'))) {
+        dataStart = i + 1; break;
+      }
+    }
+
+    const toAdd = [], skipped = [], errors = [];
+    for (let i = dataStart; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row.some(c => c)) continue; // skip empty rows
+      const [, name, phone, dept, supName, wageRaw, username, password] = row;
+      const nameTrim = String(name||'').trim();
+      const userTrim = String(username||'').trim();
+      if (!nameTrim || !userTrim) { errors.push(`แถว ${i+1}: ชื่อ/Username ว่าง`); continue; }
+      // Check duplicate username
+      if (db.employees.find(ex => ex.username === userTrim)) {
+        skipped.push(nameTrim + ' (' + userTrim + ')'); continue;
+      }
+      // Find supervisor by name
+      const sup = db.supervisors.find(s => s.name === String(supName||'').trim());
+      const deptTrim = String(dept||'').trim();
+      const wage = parseInt(wageRaw) || db.wage.defaultWage;
+      toAdd.push({
+        name: nameTrim,
+        phone: String(phone||'').trim(),
+        dept: deptTrim,
+        sup: sup?.name || String(supName||'').trim(),
+        supId: sup?._key || '',
+        wage, username: userTrim,
+        password: String(password||'1234').trim()
+      });
+    }
+
+    if (!toAdd.length && !skipped.length && !errors.length) return alert('ไม่พบข้อมูลในไฟล์');
+
+    // Preview modal
+    const body = `
+      <div style="font-size:13px;margin-bottom:12px;">
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
+          <span style="background:#dcfce7;color:#166534;padding:4px 12px;border-radius:20px;font-weight:600;">✅ เพิ่มได้ ${toAdd.length} คน</span>
+          ${skipped.length?`<span style="background:#fef9c3;color:#854d0e;padding:4px 12px;border-radius:20px;font-weight:600;">⏭️ ข้าม ${skipped.length} คน (ซ้ำ)</span>`:''}
+          ${errors.length?`<span style="background:#fee2e2;color:#991b1b;padding:4px 12px;border-radius:20px;font-weight:600;">❌ ข้อผิดพลาด ${errors.length}</span>`:''}
+        </div>
+        ${toAdd.length?`<div style="max-height:200px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:10px;">
+          <table style="width:100%;font-size:12px;border-collapse:collapse;">
+            <thead style="background:#f8fafc;"><tr>
+              <th style="padding:7px 10px;text-align:left;">ชื่อ</th>
+              <th style="padding:7px 10px;text-align:left;">สายงาน</th>
+              <th style="padding:7px 10px;text-align:left;">Username</th>
+              <th style="padding:7px 10px;text-align:right;">ค่าแรง</th>
+            </tr></thead>
+            <tbody>${toAdd.map((r,i)=>`<tr style="border-top:1px solid #f1f5f9;background:${i%2?'#f8fafc':''}">
+              <td style="padding:6px 10px;">${r.name}</td>
+              <td style="padding:6px 10px;color:#64748b;">${r.dept||'-'}</td>
+              <td style="padding:6px 10px;font-family:monospace;color:#2563eb;">${r.username}</td>
+              <td style="padding:6px 10px;text-align:right;">฿${r.wage.toLocaleString()}</td>
+            </tr>`).join('')}</tbody>
+          </table>
+        </div>`:''}
+        ${skipped.length?`<div style="margin-top:10px;padding:10px;background:#fef9c3;border-radius:8px;font-size:11px;color:#854d0e;"><strong>ข้ามเนื่องจาก Username ซ้ำ:</strong> ${skipped.join(', ')}</div>`:''}
+        ${errors.length?`<div style="margin-top:8px;padding:10px;background:#fee2e2;border-radius:8px;font-size:11px;color:#991b1b;"><strong>ข้อผิดพลาด:</strong><br>${errors.join('<br>')}</div>`:''}
+      </div>`;
+    openModal('ยืนยันการนำเข้าพนักงาน', body,
+      toAdd.length
+        ? `<button onclick="doImportEmp()" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-lg text-sm font-bold"><i class="fas fa-upload mr-1"></i>นำเข้า ${toAdd.length} คน</button>
+           <button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-4 py-2.5 rounded-lg text-sm">ยกเลิก</button>`
+        : `<button onclick="closeModal()" class="bg-gray-200 text-gray-700 px-6 py-2.5 rounded-lg text-sm font-medium">ปิด</button>`);
+    window._importQueue = toAdd;
+  };
+  reader.readAsArrayBuffer(file);
+};
+
+window.doImportEmp = async function() {
+  const queue = window._importQueue || []; if (!queue.length) return;
+  showSync();
+  let done = 0;
+  for (const rec of queue) {
+    const res = await fbPush('/employees', rec);
+    db.employees.push({ _key: res.name, ...rec });
+    done++;
+  }
+  window._importQueue = [];
+  hideSync();
+  closeModal();
+  pgEmps();
+  alert(`✅ นำเข้าสำเร็จ ${done} คน`);
+};
 function empRows(emps){
   return emps.length===0?EmptyR(8):emps.map(e=>`<tr class="hover:bg-gray-50">
     <td class="px-4 py-2 font-mono text-xs text-gray-400">${e._key}</td>
@@ -1345,63 +1479,110 @@ window.loadRptMonthly=loadRptMonthly;
 // =====================================================================
 //  REPORT SUPERVISOR
 // =====================================================================
-function pgRptSup(){
-  const mc=document.getElementById('main-content');
-  const months=getMonths();
-  const mOpts=months.map(m=>`<option value="${m.v}">${m.l}</option>`).join('');
-  mc.innerHTML=`<div class="flex justify-between items-center mb-5">
-    <h3 class="text-base font-bold text-gray-700 border-l-4 border-blue-500 pl-3">สรุปตามหัวหน้างาน</h3>
-    <select class="border rounded-lg px-3 py-2 text-sm" onchange="loadSupRpt(this.value)">${mOpts}</select>
-  </div><div id="sup-rpt-area"><div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div></div>`;
-  if(months[0])loadSupRpt(months[0].v);
-}
-window.loadSupRpt=async function(month){
-  await loadAttendanceMonth(month);
-  const area=document.getElementById('sup-rpt-area');if(!area)return;
-  const sd={};
-  db.supervisors.forEach(s=>{sd[s._key]={...s,empSet:new Set(),days:0,tWage:0,tOt:0};});
-  Object.entries(db.attendance).forEach(([k,bucket])=>{
-    if(!k.startsWith(month))return;
-    Object.values(bucket||{}).forEach(r=>{
-      if(!sd[r.supId])return;
-      sd[r.supId].empSet.add(r.empId);sd[r.supId].days++;sd[r.supId].tWage+=r.total;sd[r.supId].tOt+=r.otPay;
-    });
-  });
-  area.innerHTML=`<div class="grid grid-cols-1 md:grid-cols-2 gap-5">`+Object.values(sd).map(s=>{
-    const subs=db.employees.filter(e=>e.supId===s._key);
-    return`<div class="bg-white rounded-xl shadow-sm p-5">
-      <div class="flex justify-between items-start mb-4">
-        <div><div class="font-bold text-gray-800">${s.name}</div><div class="text-xs text-gray-400 mt-0.5">${s.dept||'-'}</div></div>
-        ${bdg('blue','ลูกน้อง '+subs.length+' คน')}
-      </div>
-      <div class="grid grid-cols-3 gap-3 mb-4">
-        <div class="bg-green-50 rounded-lg p-3 text-center"><div class="text-lg font-bold text-green-700">${s.empSet.size}</div><div class="text-xs text-green-600">คนที่ทำงาน</div></div>
-        <div class="bg-blue-50 rounded-lg p-3 text-center"><div class="text-lg font-bold text-blue-700">${s.days}</div><div class="text-xs text-blue-600">Man-Day</div></div>
-        <div class="bg-purple-50 rounded-lg p-3 text-center"><div class="text-sm font-bold text-purple-700">฿${s.tWage.toLocaleString()}</div><div class="text-xs text-purple-600">ค่าแรงรวม</div></div>
-      </div>
-      <div class="border-t pt-3"><div class="text-xs font-semibold text-gray-500 mb-2">รายชื่อลูกน้อง (${subs.length} คน)</div>
-        <div class="flex flex-wrap gap-1">${subs.map(e=>`<span class="${s.empSet.has(e.empId||e._key)?'badge-green':'badge-red'} px-2 py-0.5 rounded text-xs">${e.name.replace('นาย ','').replace('นาง ','').replace('น.ส.','')}</span>`).join('')}</div>
-      </div></div>`;
-  }).join('')+'</div>';
-};
-
 // =====================================================================
 //  REPORT EMPLOYEE
 // =====================================================================
 function pgRptEmp(){
   const mc=document.getElementById('main-content');
-  const eOpts=[{v:'',l:'-- เลือกพนักงาน --'},...db.employees.map(e=>({v:e._key,l:e._key+': '+e.name}))];
-  const months=getMonths();const mOpts=months.map(m=>`<option value="${m.v}">${m.l}</option>`).join('');
-  mc.innerHTML=`<div class="flex gap-3 items-center mb-5 flex-wrap">
-    <h3 class="text-base font-bold text-gray-700 border-l-4 border-blue-500 pl-3 mr-auto">ประวัติรายบุคคล</h3>
-    ${Sel('re-emp',eOpts)}
-    <select id="re-mon" class="border rounded-lg px-3 py-2 text-sm">${mOpts}</select>
-    <button onclick="loadEmpRpt()" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm">ดูข้อมูล</button>
-  </div><div id="re-area"></div>`;
+  const months=getMonths();
+  const mOpts=months.map(m=>`<option value="${m.v}">${m.l}</option>`).join('');
+  mc.innerHTML=`
+  <div class="bg-white rounded-xl shadow-sm p-5 mb-5">
+    <h3 class="text-base font-bold text-gray-700 border-l-4 border-blue-500 pl-3 mb-4">ประวัติรายบุคคล</h3>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div class="md:col-span-2">
+        <label class="text-xs font-semibold text-gray-500 block mb-1">ค้นหาพนักงาน</label>
+        <div style="position:relative;">
+          <i class="fas fa-search" style="position:absolute;left:11px;top:50%;transform:translateY(-50%);color:#94a3b8;font-size:13px;pointer-events:none;"></i>
+          <input id="re-search" type="text" placeholder="พิมพ์ชื่อ, สายงาน, หรือหัวหน้างาน..."
+            class="w-full border border-gray-300 rounded-lg py-2.5 text-sm focus:ring-2 focus:ring-blue-400 outline-none"
+            style="padding-left:34px;"
+            oninput="filterEmpRptList(this.value)" autocomplete="off">
+          <div id="re-search-drop" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:200;background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.10);max-height:260px;overflow-y:auto;margin-top:4px;"></div>
+        </div>
+      </div>
+      <div>
+        <label class="text-xs font-semibold text-gray-500 block mb-1">เดือน</label>
+        <select id="re-mon" class="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-400 outline-none">${mOpts}</select>
+      </div>
+    </div>
+    <div id="re-selected" style="display:none;margin-top:12px;"></div>
+    <input type="hidden" id="re-emp" value="">
+    <div class="mt-4">
+      <button onclick="loadEmpRpt()"
+        class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg text-sm font-bold shadow-sm transition flex items-center gap-2">
+        <i class="fas fa-search"></i> ดูประวัติ
+      </button>
+    </div>
+  </div>
+  <div id="re-area"></div>`;
 }
+
+window.filterEmpRptList = function(q) {
+  const drop = document.getElementById('re-search-drop');
+  if (!q.trim()) { drop.style.display = 'none'; return; }
+  const qLow = q.toLowerCase();
+  const matched = db.employees.filter(e =>
+    e.name.toLowerCase().includes(qLow) ||
+    (e.dept||'').toLowerCase().includes(qLow) ||
+    (e.sup||'').toLowerCase().includes(qLow) ||
+    (e.username||'').toLowerCase().includes(qLow)
+  ).slice(0, 8);
+  if (!matched.length) {
+    drop.style.display = 'block';
+    drop.innerHTML = `<div style="padding:14px;font-size:13px;color:#94a3b8;text-align:center;">ไม่พบพนักงาน</div>`;
+    return;
+  }
+  drop.style.display = 'block';
+  drop.innerHTML = matched.map(e => {
+    const hasFace = (e.faceDescriptors && e.faceDescriptors.length > 0) || e.faceDescriptor;
+    return `<div onclick="selectEmpRpt('${e._key}')"
+      style="padding:11px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;border-bottom:1px solid #f1f5f9;transition:background .15s;"
+      onmouseover="this.style.background='#eff6ff'" onmouseout="this.style.background='transparent'">
+      <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0;">${e.name[0]}</div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:700;font-size:13px;color:#1e293b;">${e.name}</div>
+        <div style="font-size:11px;color:#64748b;margin-top:1px;">${e.dept||'-'} · ${e.sup||'-'}</div>
+      </div>
+      ${hasFace ? '<span style="background:#dcfce7;color:#166534;font-size:10px;padding:1px 6px;border-radius:6px;font-weight:600;flex-shrink:0;">😊</span>' : ''}
+    </div>`;
+  }).join('');
+};
+
+window.selectEmpRpt = function(key) {
+  const emp = db.employees.find(e => e._key === key); if (!emp) return;
+  document.getElementById('re-emp').value    = key;
+  document.getElementById('re-search').value = emp.name;
+  document.getElementById('re-search-drop').style.display = 'none';
+  const chip = document.getElementById('re-selected');
+  chip.style.display = 'block';
+  chip.innerHTML = `
+    <div style="display:inline-flex;align-items:center;gap:8px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:20px;padding:6px 14px 6px 8px;">
+      <div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;">${emp.name[0]}</div>
+      <div>
+        <div style="font-weight:700;font-size:13px;color:#1e40af;">${emp.name}</div>
+        <div style="font-size:11px;color:#3b82f6;">${emp.dept||'-'} · ${emp.sup||'-'}</div>
+      </div>
+      <button onclick="clearEmpRptSelect()" style="background:none;border:none;color:#93c5fd;cursor:pointer;font-size:18px;padding:0;line-height:1;margin-left:4px;">×</button>
+    </div>`;
+};
+
+window.clearEmpRptSelect = function() {
+  document.getElementById('re-emp').value = '';
+  document.getElementById('re-search').value = '';
+  document.getElementById('re-selected').style.display = 'none';
+  document.getElementById('re-area').innerHTML = '';
+};
+
+document.addEventListener('click', function(e) {
+  const drop = document.getElementById('re-search-drop');
+  if (drop && !drop.contains(e.target) && e.target.id !== 're-search') drop.style.display = 'none';
+});
+
 window.loadEmpRpt=async function(){
-  const ekey=document.getElementById('re-emp').value,month=document.getElementById('re-mon').value;
-  if(!ekey)return alert('กรุณาเลือกพนักงาน');
+  const ekey=document.getElementById('re-emp').value;
+  const month=document.getElementById('re-mon').value;
+  if(!ekey){ alert('กรุณาเลือกพนักงานก่อน'); document.getElementById('re-search')?.focus(); return; }
   const emp=db.employees.find(e=>e._key===ekey);
   document.getElementById('re-area').innerHTML='<div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div>';
   await loadAttendanceMonth(month);
@@ -1414,28 +1595,46 @@ window.loadEmpRpt=async function(){
   recs.sort((a,b)=>a.dk.localeCompare(b.dk));
   const tD=recs.length,tW=recs.reduce((s,r)=>s+r.wage,0),tO=recs.reduce((s,r)=>s+r.otPay,0),tA=recs.reduce((s,r)=>s+r.total,0),tOH=recs.reduce((s,r)=>s+r.otHours,0);
   const places=[...new Set(recs.map(r=>r.dept))];
+  const calcHrs=(i,o)=>{if(!i||!o)return null;const[ih,im]=i.split(':').map(Number),[oh,om]=o.split(':').map(Number),m=(oh*60+om)-(ih*60+im);return m>0?parseFloat((m/60).toFixed(2)):null;};
+  const totalHrs=recs.reduce((s,r)=>{const h=calcHrs(r.checkInTime,r.checkOutTime);return s+(h||0);},0);
   document.getElementById('re-area').innerHTML=card(`
-    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-5">
-      <div class="font-bold text-blue-800">${emp?.name||ekey}</div>
-      <div class="text-xs text-blue-500 mt-1">สายงาน: ${emp?.dept||'-'} · หัวหน้า: ${emp?.sup||'-'} · สถานที่: ${places.join(', ')||'-'}</div>
+    <div style="background:linear-gradient(135deg,#eff6ff,#dbeafe);border-radius:12px;padding:16px;margin-bottom:16px;display:flex;align-items:center;gap:14px;">
+      <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;flex-shrink:0;">${emp?.name[0]||'?'}</div>
+      <div>
+        <div style="font-weight:700;font-size:16px;color:#1e40af;">${emp?.name||ekey}</div>
+        <div style="font-size:12px;color:#3b82f6;margin-top:3px;">สายงาน: ${emp?.dept||'-'} · หัวหน้า: ${emp?.sup||'-'}</div>
+        ${places.length?`<div style="font-size:11px;color:#60a5fa;margin-top:2px;">สถานที่: ${places.join(', ')}</div>`:''}
+      </div>
     </div>
-    <div class="grid grid-cols-4 gap-4 mb-5">
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
       ${StatCard('วันทำงาน',tD+' วัน','fa-calendar-check','green')}
-      ${StatCard('OT รวม',tOH.toFixed(1)+' ชม.','fa-clock','yellow')}
-      ${StatCard('ค่าแรง','฿'+tW.toLocaleString(),'fa-coins','blue')}
+      ${StatCard('ชม.รวม',totalHrs>0?totalHrs.toFixed(1)+' ชม.':'-','fa-clock','blue')}
+      ${StatCard('OT รวม',tOH>0?tOH.toFixed(1)+' ชม.':'-','fa-business-time','yellow')}
       ${StatCard('รวมทั้งหมด','฿'+tA.toLocaleString(),'fa-sack-dollar','purple')}
     </div>
-    <table class="min-w-full text-sm">${THead('วันที่','เวลา','สถานที่','OT','ค่าแรง','ค่าOT','รวม','GPS')}
-    <tbody>${recs.length===0?EmptyR(8):recs.map(r=>`<tr class="hover:bg-gray-50">
-      <td class="px-4 py-2">${fmtThai(r.dk)}</td>
-      <td class="px-4 py-2 font-mono">${r.checkInTime}</td>
-      <td class="px-4 py-2">${r.dept}</td>
+    <div class="overflow-x-auto">
+    <table class="min-w-full text-sm">${THead('วันที่','เข้า','ออก','ชม.','OT','ค่าแรง','ค่าOT','รวม','GPS','วิธี')}
+    <tbody>${recs.length===0?EmptyR(10):recs.map(r=>`<tr class="hover:bg-gray-50">
+      <td class="px-4 py-2 whitespace-nowrap">${fmtThai(r.dk)}</td>
+      <td class="px-4 py-2 font-mono text-green-700">${r.checkInTime}</td>
+      <td class="px-4 py-2 font-mono ${r.checkOutTime?'text-red-600':'text-gray-300'}">${r.checkOutTime||'—'}</td>
+      <td class="px-4 py-2 text-center text-gray-600">${(()=>{const h=calcHrs(r.checkInTime,r.checkOutTime);return h?h+'h':'-';})()}</td>
       <td class="px-4 py-2 text-center">${r.otHours>0?bdg('yellow',r.otHours+'ชม.'):'-'}</td>
       <td class="px-4 py-2 text-right">฿${r.wage.toLocaleString()}</td>
       <td class="px-4 py-2 text-right">฿${r.otPay.toLocaleString()}</td>
       <td class="px-4 py-2 text-right font-bold text-blue-700">฿${r.total.toLocaleString()}</td>
       <td class="px-4 py-2">${r.gpsOk?bdg('green','✓'):bdg('red','✗')}</td>
-    </tr>`).join('')}</tbody></table>`);
+      <td class="px-4 py-2 text-center">${r.checkInMethod==='face'?'😊':r.checkInMethod==='admin'?'👨‍💼':'📱'}</td>
+    </tr>`).join('')}</tbody>
+    <tfoot class="bg-gray-50 font-bold"><tr>
+      <td colspan="3" class="px-4 py-2 text-right text-sm text-gray-600">รวม</td>
+      <td class="px-4 py-2 text-center text-sm">${totalHrs>0?totalHrs.toFixed(1)+'h':'-'}</td>
+      <td class="px-4 py-2 text-center text-sm">${tOH>0?tOH.toFixed(1):'-'}</td>
+      <td class="px-4 py-2 text-right text-sm">฿${tW.toLocaleString()}</td>
+      <td class="px-4 py-2 text-right text-sm">฿${tO.toLocaleString()}</td>
+      <td class="px-4 py-2 text-right text-sm text-blue-700">฿${tA.toLocaleString()}</td>
+      <td colspan="2"></td>
+    </tr></tfoot></table></div>`);
 };
 
 // =====================================================================
@@ -1930,20 +2129,40 @@ window.selectSearchResult = function(lat, lon, displayName) {
 function pgManagePwd(){
   const mc=document.getElementById('main-content');
   mc.innerHTML=`<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-    ${card(`${sHead('รหัสผ่านหัวหน้างาน')}<table class="min-w-full text-sm">${THead('ชื่อ','Username','จัดการ')}
-    <tbody>${db.supervisors.map(s=>`<tr class="hover:bg-gray-50">
-      <td class="px-4 py-3 font-medium">${s.name}</td>
-      <td class="px-4 py-3 font-mono text-blue-700">${s.username}</td>
-      <td class="px-4 py-3"><button onclick="editSupPwd('${s._key}')" class="text-purple-600 text-sm hover:underline"><i class="fas fa-key mr-1"></i>เปลี่ยนรหัส</button></td>
-    </tr>`).join('')}</tbody></table>`)}
-    ${card(`${sHead('รหัสผ่านพนักงาน')}<table class="min-w-full text-sm">${THead('ชื่อ','Username','จัดการ')}
-    <tbody>${db.employees.map(e=>`<tr class="hover:bg-gray-50">
-      <td class="px-4 py-3 font-medium">${e.name}</td>
-      <td class="px-4 py-3 font-mono text-blue-700 text-xs">${e.username}</td>
-      <td class="px-4 py-3"><button onclick="empPwd('${e._key}')" class="text-purple-600 text-sm hover:underline"><i class="fas fa-key mr-1"></i>เปลี่ยนรหัส</button></td>
-    </tr>`).join('')}</tbody></table>`)}
+    ${card(`${sHead('รหัสผ่านหัวหน้างาน')}
+    <input type="text" id="spwd-search" placeholder="ค้นหาชื่อ/username..." class="w-full border rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1" oninput="filterSupPwd(this.value)">
+    <div style="max-height:400px;overflow-y:auto;">
+    <table class="min-w-full text-sm">${THead('ชื่อ','Username','จัดการ')}
+    <tbody id="sup-pwd-tbody">${db.supervisors.map(s=>`<tr class="hover:bg-gray-50">
+      <td class="px-4 py-2.5 font-medium">${s.name}</td>
+      <td class="px-4 py-2.5 font-mono text-blue-700 text-xs">${s.username}</td>
+      <td class="px-4 py-2.5"><button onclick="editSupPwd('${s._key}')" class="text-purple-600 text-sm hover:underline"><i class="fas fa-key mr-1"></i>เปลี่ยนรหัส</button></td>
+    </tr>`).join('')}</tbody></table></div>`)}
+    ${card(`${sHead('รหัสผ่านพนักงาน')}
+    <input type="text" id="epwd-search" placeholder="ค้นหาชื่อ/username..." class="w-full border rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1" oninput="filterEmpPwd(this.value)">
+    <div style="max-height:400px;overflow-y:auto;">
+    <table class="min-w-full text-sm">${THead('ชื่อ','Username','จัดการ')}
+    <tbody id="emp-pwd-tbody">${db.employees.map(e=>`<tr class="hover:bg-gray-50">
+      <td class="px-4 py-2.5 font-medium">${e.name}</td>
+      <td class="px-4 py-2.5 font-mono text-blue-700 text-xs">${e.username}</td>
+      <td class="px-4 py-2.5"><button onclick="empPwd('${e._key}')" class="text-purple-600 text-sm hover:underline"><i class="fas fa-key mr-1"></i>เปลี่ยนรหัส</button></td>
+    </tr>`).join('')}</tbody></table></div>`)}
   </div>`;
 }
+window.filterSupPwd = q => {
+  const tbody = document.getElementById('sup-pwd-tbody'); if(!tbody) return;
+  const ql = q.toLowerCase();
+  tbody.innerHTML = db.supervisors.filter(s=>!q||s.name.toLowerCase().includes(ql)||s.username.toLowerCase().includes(ql))
+    .map(s=>`<tr class="hover:bg-gray-50"><td class="px-4 py-2.5 font-medium">${s.name}</td><td class="px-4 py-2.5 font-mono text-blue-700 text-xs">${s.username}</td>
+    <td class="px-4 py-2.5"><button onclick="editSupPwd('${s._key}')" class="text-purple-600 text-sm hover:underline"><i class="fas fa-key mr-1"></i>เปลี่ยนรหัส</button></td></tr>`).join('');
+};
+window.filterEmpPwd = q => {
+  const tbody = document.getElementById('emp-pwd-tbody'); if(!tbody) return;
+  const ql = q.toLowerCase();
+  tbody.innerHTML = db.employees.filter(e=>!q||e.name.toLowerCase().includes(ql)||e.username.toLowerCase().includes(ql))
+    .map(e=>`<tr class="hover:bg-gray-50"><td class="px-4 py-2.5 font-medium">${e.name}</td><td class="px-4 py-2.5 font-mono text-blue-700 text-xs">${e.username}</td>
+    <td class="px-4 py-2.5"><button onclick="empPwd('${e._key}')" class="text-purple-600 text-sm hover:underline"><i class="fas fa-key mr-1"></i>เปลี่ยนรหัส</button></td></tr>`).join('');
+};
 
 // =====================================================================
 //  QR GENERATOR PAGE
@@ -3378,6 +3597,8 @@ window.openFaceScanCheckout = async function() {
 
 async function _startFaceCam() {
   faceDetecting = false;
+  // Reset all security buffers
+  _faceConfirmBuf = []; _faceRegBuf = []; _faceRegSampling = false; _faceFrameCount = 0;
   if (faceRafHandle) { cancelAnimationFrame(faceRafHandle); faceRafHandle = null; }
   if (faceStream) { faceStream.getTracks().forEach(t => t.stop()); faceStream = null; }
   try {
@@ -3414,6 +3635,25 @@ async function _startFaceCam() {
   }
 }
 
+// ============================================================
+//  FACE SECURITY CONSTANTS  (ปรับค่าได้ตามสภาพแวดล้อม)
+// ============================================================
+const FACE_MATCH_THRESHOLD   = 0.38;  // FaceMatcher max distance (เข้มงวด)
+const FACE_CONFIRM_FRAMES    = 4;     // ต้องยืนยัน 4 เฟรมติดกัน
+const FACE_CONFIRM_DIST_MAX  = 0.36;  // แต่ละเฟรมต้อง ≤ 0.36
+const FACE_SCORE_MIN         = 0.72;  // TinyFaceDetector confidence ขั้นต่ำ
+const FACE_REG_SAMPLES       = 5;     // จำนวนเฟรมสำหรับ registration (average)
+const FACE_REG_SCORE_MIN     = 0.75;  // Confidence ขั้นต่ำระหว่าง register
+const FACE_SIZE_MIN          = 0.08;  // ใบหน้าต้องใหญ่กว่า 8% ของเฟรม
+const FACE_LIVENESS_FRAMES   = 6;     // เฟรมต่ำสุดก่อนเริ่ม check (anti-static-photo)
+let _faceConfirmBuf  = [];
+let _faceFrameCount  = 0;            // นับเฟรมทั้งหมดตั้งแต่เปิดกล้อง (liveness)
+let _faceRegBuf      = [];           // buffer เฟรม registration
+let _faceRegSampling = false;
+
+// ============================================================
+//  FAST DETECTION LOOP  (ใช้ requestAnimationFrame)
+// ============================================================
 async function _faceDetectLoop() {
   if (!faceDetecting) return;
   const v = document.getElementById('face-vid');
@@ -3421,63 +3661,222 @@ async function _faceDetectLoop() {
     faceRafHandle = requestAnimationFrame(_faceDetectLoop); return;
   }
 
-  const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.45 });
+  _faceFrameCount++;
+
+  // Draw to canvas (320×240 — balance speed vs accuracy)
+  const canvas = document.createElement('canvas');
+  canvas.width = 320; canvas.height = 240;
+  canvas.getContext('2d').drawImage(v, 0, 0, 320, 240);
+
+  const opts = new faceapi.TinyFaceDetectorOptions({
+    inputSize: 320,
+    scoreThreshold: FACE_SCORE_MIN   // strict detection confidence
+  });
 
   let det;
   try {
-    // Run detection on a small canvas for speed
-    const canvas = document.createElement('canvas');
-    canvas.width = 224; canvas.height = 168;
-    canvas.getContext('2d').drawImage(v, 0, 0, 224, 168);
     det = await faceapi.detectSingleFace(canvas, opts).withFaceLandmarks(true).withFaceDescriptor();
-  } catch(e) {
+  } catch {
     if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
     return;
   }
+  if (!faceDetecting) return;
 
-  if (!faceDetecting) return; // stopped while awaiting
-
+  // ---- No face detected ----
   if (!det) {
+    _faceConfirmBuf = []; _faceRegBuf = []; _faceRegSampling = false;
     setFaceRing('gray');
-    setFaceStatus('warn', '⚠️ ไม่พบใบหน้า — ยกศีรษะให้ตรงกล้อง');
-    // Retry after short pause to avoid CPU thrash
-    await new Promise(r => setTimeout(r, 300));
+    setFaceStatus('warn', '⚠️ ไม่พบใบหน้า — จ่อหน้าให้ตรงกล้อง');
+    await new Promise(r => setTimeout(r, 350));
     if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
     return;
   }
 
-  setFaceRing('green');
-  const descriptor = Array.from(det.descriptor);
-  // Stop loop before async handler (handler may restart if needed)
-  faceDetecting = false;
-  if (faceModalMode === 'register' || faceModalMode === 'emp-register') {
-    await _handleFaceRegister(descriptor);
-  } else if (faceModalMode === 'checkin') {
-    await _handleFaceCheckin(descriptor);
-  } else if (faceModalMode === 'checkout') {
-    await _handleFaceCheckout(descriptor);
+  // ---- Face size quality check ----
+  const faceW = det.detection.box.width  / canvas.width;
+  const faceH = det.detection.box.height / canvas.height;
+  if (faceW < FACE_SIZE_MIN || faceH < FACE_SIZE_MIN) {
+    _faceConfirmBuf = []; _faceRegBuf = [];
+    setFaceRing('yellow');
+    setFaceStatus('warn', '⚠️ ใกล้กล้องกว่านี้อีกนิด...');
+    await new Promise(r => setTimeout(r, 250));
+    if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
+    return;
   }
+
+  const descriptor = Array.from(det.descriptor);
+
+  // ============================================================
+  //  REGISTER MODE  — multi-frame averaging
+  // ============================================================
+  if (faceModalMode === 'register' || faceModalMode === 'emp-register') {
+    // Liveness: need FACE_LIVENESS_FRAMES real frames before accepting
+    if (_faceFrameCount < FACE_LIVENESS_FRAMES) {
+      setFaceRing('blue');
+      setFaceStatus('info', `🎥 กำลังตรวจสอบใบหน้า... (${_faceFrameCount}/${FACE_LIVENESS_FRAMES})`);
+      await new Promise(r => setTimeout(r, 120));
+      if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
+      return;
+    }
+
+    // Collect FACE_REG_SAMPLES high-quality frames
+    if (!_faceRegSampling) {
+      _faceRegSampling = true;
+      _faceRegBuf = [];
+    }
+
+    _faceRegBuf.push(descriptor);
+    const pct = Math.round((_faceRegBuf.length / FACE_REG_SAMPLES) * 100);
+    setFaceRing(_faceRegBuf.length >= FACE_REG_SAMPLES ? 'green' : 'blue');
+    setFaceStatus('info',
+      `📸 กำลังเก็บตัวอย่างใบหน้า...<br>
+       <div style="background:#dbeafe;border-radius:6px;height:8px;margin:8px 0 4px;overflow:hidden;">
+         <div style="background:#2563eb;height:100%;width:${pct}%;transition:width .2s;border-radius:6px;"></div>
+       </div>
+       <span style="font-size:11px;color:#1d4ed8;">${_faceRegBuf.length}/${FACE_REG_SAMPLES} ตัวอย่าง · กรุณาอยู่นิ่งๆ</span>`);
+
+    if (_faceRegBuf.length < FACE_REG_SAMPLES) {
+      await new Promise(r => setTimeout(r, 200));
+      if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
+      return;
+    }
+
+    // Enough samples — compute mean descriptor
+    faceDetecting = false;
+    _faceRegSampling = false;
+    const meanDesc = _computeMeanDescriptor(_faceRegBuf);
+    _faceRegBuf = [];
+    await _handleFaceRegister(meanDesc);
+    return;
+  }
+
+  // ============================================================
+  //  CHECKIN / CHECKOUT MODE  — strict multi-frame confirm
+  // ============================================================
+
+  // Liveness gate: reject first N frames (anti-static-photo)
+  if (_faceFrameCount < FACE_LIVENESS_FRAMES) {
+    setFaceRing('blue');
+    setFaceStatus('info', `🎥 กำลังตรวจสอบใบหน้า... (${_faceFrameCount}/${FACE_LIVENESS_FRAMES})`);
+    await new Promise(r => setTimeout(r, 120));
+    if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
+    return;
+  }
+
+  const matched = _matchFace(descriptor);
+
+  if (!matched) {
+    _faceConfirmBuf = [];
+    setFaceRing('red');
+    const hasAny = db.employees.some(e => (e.faceDescriptors?.length > 0) || e.faceDescriptor);
+    setFaceStatus('error',
+      hasAny
+        ? `❌ ไม่รู้จักใบหน้านี้<br><span style="font-size:11px;">กรุณาลงทะเบียนใบหน้าก่อน หรือขอให้ HR ลงทะเบียนให้</span>`
+        : `❌ ยังไม่มีพนักงานลงทะเบียนใบหน้าในระบบ`);
+    await new Promise(r => setTimeout(r, 800));
+    if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
+    return;
+  }
+
+  // Accumulate frames — must be same person AND strict distance every frame
+  const last = _faceConfirmBuf[_faceConfirmBuf.length - 1];
+  if (!last || last.label !== matched.emp._key || matched.dist > FACE_CONFIRM_DIST_MAX) {
+    _faceConfirmBuf = [];
+  }
+  if (matched.dist <= FACE_CONFIRM_DIST_MAX) {
+    _faceConfirmBuf.push({ label: matched.emp._key, dist: matched.dist });
+  }
+
+  const confirmed   = _faceConfirmBuf.length >= FACE_CONFIRM_FRAMES;
+  const pct         = Math.round((_faceConfirmBuf.length / FACE_CONFIRM_FRAMES) * 100);
+  const confidence  = Math.max(0, Math.round((1 - matched.dist / FACE_MATCH_THRESHOLD) * 100));
+
+  if (!confirmed) {
+    setFaceRing('blue');
+    setFaceStatus('info',
+      `👤 พบ: <strong>${matched.emp.name}</strong><br>
+       <div style="background:#dcfce7;border-radius:6px;height:8px;margin:8px 0 4px;overflow:hidden;">
+         <div style="background:#16a34a;height:100%;width:${pct}%;transition:width .15s;border-radius:6px;"></div>
+       </div>
+       <span style="font-size:11px;color:#15803d;">ยืนยัน ${_faceConfirmBuf.length}/${FACE_CONFIRM_FRAMES} เฟรม · ความมั่นใจ ${confidence}%</span>`);
+    await new Promise(r => setTimeout(r, 120));
+    if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
+    return;
+  }
+
+  // ✅ Confirmed — average the confirmed descriptors for final match
+  setFaceRing('green');
+  const avgDesc = _computeMeanDescriptor(_faceConfirmBuf.map(() => descriptor)); // last descriptor (all same person)
+  _faceConfirmBuf = [];
+  faceDetecting = false;
+
+  if (faceModalMode === 'checkin')  await _handleFaceCheckin(avgDesc);
+  else if (faceModalMode === 'checkout') await _handleFaceCheckout(avgDesc);
 }
 
-// ---- Register: save descriptor to Firebase ----
+// ---- Compute mean descriptor from multiple samples ----
+function _computeMeanDescriptor(samples) {
+  const len = 128;
+  const mean = new Array(len).fill(0);
+  for (const s of samples) {
+    for (let i = 0; i < len; i++) mean[i] += s[i];
+  }
+  for (let i = 0; i < len; i++) mean[i] /= samples.length;
+  return mean;
+}
+
+// ---- Register: save descriptor to Firebase (stores multiple descriptors for better accuracy) ----
 async function _handleFaceRegister(descriptor) {
   faceDetecting = false;
   setFaceStatus('info', '📸 จับใบหน้าสำเร็จ! กำลังบันทึก...');
-  // Show success overlay
   const overlay = document.getElementById('face-scan-overlay');
   if (overlay) { overlay.style.display = 'flex'; setTimeout(() => { if(overlay) overlay.style.display = 'none'; }, 1200); }
+
+  const empKey = faceRegEmpKey;
+  const emp    = db.employees.find(e => e._key === empKey);
+  if (!emp) { setFaceStatus('error', '❌ ไม่พบข้อมูลพนักงาน'); return; }
+
+  const isEmpSelf   = (faceModalMode === 'emp-register');
+  const newCount    = (emp.faceRegCount || 0) + 1;
+  const willLock    = isEmpSelf && newCount >= FACE_REG_MAX;
+
+  // Store ALL descriptors as array (keep existing ones + new one)
+  const existing    = emp.faceDescriptors || (emp.faceDescriptor ? [emp.faceDescriptor] : []);
+  const allDescs    = [...existing.filter(d => Array.isArray(d) && d.length === 128), descriptor];
+  // Keep max FACE_REG_MAX samples (newest ones)
+  const keepDescs   = allDescs.slice(-FACE_REG_MAX);
+
+  const updatePayload = {
+    faceDescriptors: keepDescs,  // new multi-descriptor array
+    faceDescriptor:  descriptor, // keep legacy single for compat
+    faceRegCount:    newCount,
+    ...(isEmpSelf && willLock ? { faceRegLocked: true } : {})
+  };
+
   try {
     showSync();
-    await fbPatch(`/employees/${faceRegEmpKey}`, { faceDescriptor: descriptor });
-    const idx = db.employees.findIndex(e => e._key === faceRegEmpKey);
-    if (idx >= 0) db.employees[idx].faceDescriptor = descriptor;
+    await fbPatch('/employees/' + empKey, updatePayload);
+    const idx = db.employees.findIndex(e => e._key === empKey);
+    if (idx >= 0) {
+      db.employees[idx].faceDescriptors = keepDescs;
+      db.employees[idx].faceDescriptor  = descriptor;
+      db.employees[idx].faceRegCount    = newCount;
+      if (willLock) db.employees[idx].faceRegLocked = true;
+    }
+    faceMatcherDirty = true;
     hideSync();
-    setFaceStatus('success', '✅ บันทึกใบหน้าสำเร็จ!');
-    setTimeout(() => stopFaceCam(), 1800);
+    const msg = willLock
+      ? `✅ บันทึกสำเร็จ (ครั้งที่ ${newCount}/${FACE_REG_MAX})\n🔒 ถูกล็อค — ติดต่อ HR เพื่อรีเซ็ต`
+      : `✅ บันทึกใบหน้าสำเร็จ ครั้งที่ ${newCount}/${FACE_REG_MAX}`;
+    setFaceStatus('success', msg);
+    setTimeout(() => {
+      stopFaceCam();
+      if (isEmpSelf) pgEmpFaceReg();
+    }, 2000);
   } catch(e) {
     hideSync();
     setFaceStatus('error', '❌ บันทึกไม่สำเร็จ: ' + e.message);
-    setTimeout(() => { faceDetecting = true; _faceDetectLoop(); }, 2000);
+    setTimeout(() => { faceDetecting = true; faceRafHandle = requestAnimationFrame(_faceDetectLoop); }, 2000);
   }
 }
 
@@ -3679,26 +4078,57 @@ function gpsInAny(lat, lng) {
   return { ok: bestDist <= (bestLoc.radius||100), dist: Math.round(bestDist), loc: bestLoc?.name||'' };
 }
 
-// ---- Rebuild FaceMatcher from all employees with faceDescriptor ----
+// ---- Rebuild FaceMatcher from all registered employees ----
 function _rebuildFaceMatcher() {
-  const withFace = db.employees.filter(e => Array.isArray(e.faceDescriptor) && e.faceDescriptor.length === 128);
+  const withFace = db.employees.filter(e => {
+    const descs = e.faceDescriptors || (e.faceDescriptor ? [e.faceDescriptor] : []);
+    return descs.some(d => Array.isArray(d) && d.length === 128);
+  });
   if (!withFace.length) { faceMatcher = null; faceMatcherDirty = false; return; }
-  const labeled = withFace.map(emp =>
-    new faceapi.LabeledFaceDescriptors(emp._key, [new Float32Array(emp.faceDescriptor)])
-  );
-  faceMatcher = new faceapi.FaceMatcher(labeled, 0.50);
+
+  const labeled = withFace.map(emp => {
+    const descs = (emp.faceDescriptors || [emp.faceDescriptor])
+      .filter(d => Array.isArray(d) && d.length === 128)
+      .map(d => new Float32Array(d));
+    return new faceapi.LabeledFaceDescriptors(emp._key, descs);
+  });
+  faceMatcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_THRESHOLD);
   faceMatcherDirty = false;
 }
 
-// ---- Match face — O(n) via FaceMatcher, fast for 100+ employees ----
+// ---- Match face — double verification ----
 function _matchFace(descriptor) {
   if (faceMatcherDirty || !faceMatcher) _rebuildFaceMatcher();
   if (!faceMatcher) return null;
-  const result = faceMatcher.findBestMatch(new Float32Array(descriptor));
-  if (!result || result.label === 'unknown') return null;
+
+  const query  = new Float32Array(descriptor);
+  const result = faceMatcher.findBestMatch(query);
+
+  // Primary: FaceMatcher reject
+  if (!result || result.label === 'unknown' || result.distance > FACE_MATCH_THRESHOLD) return null;
+
   const emp = db.employees.find(e => e._key === result.label);
   if (!emp) return null;
-  return { emp, dist: result.distance };
+
+  // Secondary: manual minimum distance against ALL stored descriptors
+  const descs = (emp.faceDescriptors || [emp.faceDescriptor])
+    .filter(d => Array.isArray(d) && d.length === 128);
+  if (!descs.length) return null;
+  const minDist = Math.min(...descs.map(d => faceapi.euclideanDistance(new Float32Array(d), query)));
+
+  // Tertiary: also verify no OTHER employee is closer within margin
+  // (prevents edge-case where FaceMatcher picks wrong person)
+  const allEmpsWithFace = db.employees.filter(e => e._key !== emp._key && (e.faceDescriptors?.length > 0 || e.faceDescriptor));
+  for (const other of allEmpsWithFace) {
+    const otherDescs = (other.faceDescriptors || [other.faceDescriptor])
+      .filter(d => Array.isArray(d) && d.length === 128);
+    const otherMin = Math.min(...otherDescs.map(d => faceapi.euclideanDistance(new Float32Array(d), query)));
+    // If another person is almost as close (within 0.04), reject — ambiguous
+    if (otherMin < minDist + 0.04 && otherMin <= FACE_MATCH_THRESHOLD) return null;
+  }
+
+  if (minDist > FACE_MATCH_THRESHOLD) return null;
+  return { emp, dist: minDist };
 }
 
 window.stopFaceCam = function() {
@@ -3833,41 +4263,12 @@ async function pgCheckinSettings() {
             <i class="fas fa-info-circle mr-1"></i>
             คลิก <strong>ลงทะเบียนใบหน้า</strong> แล้วจ่อกล้องให้ใบหน้าพนักงานอยู่ในกรอบ ระบบจะบันทึก Face Descriptor (128 มิติ) ลง Firebase โดยอัตโนมัติ
           </div>
+          <input type="text" id="face-reg-search" placeholder="ค้นหาชื่อ, สายงาน..." class="w-full border rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1" oninput="filterFaceRegTable(this.value)">
           <div class="overflow-x-auto max-h-96">
             <table class="min-w-full text-sm">
               ${THead('พนักงาน','สายงาน','ใบหน้า','ครั้ง','จัดการ')}
-              <tbody>
-                ${db.employees.map(e => `<tr class="hover:bg-gray-50">
-                  <td class="px-4 py-2.5 font-medium">${e.name}</td>
-                  <td class="px-4 py-2.5 text-gray-500 text-xs">${e.dept||'-'}</td>
-                  <td class="px-4 py-2.5">
-                    ${e.faceDescriptor
-                      ? bdg('green','✓ ลงทะเบียนแล้ว')
-                      : bdg('red','ยังไม่ได้ลงทะเบียน')}
-                  </td>
-                  <td class="px-4 py-2.5">
-                    <div class="flex items-center gap-1">
-                      <span class="text-xs font-bold ${(e.faceRegCount||0) >= FACE_REG_MAX ? 'text-red-500' : 'text-gray-600'}">${e.faceRegCount||0}/${FACE_REG_MAX}</span>
-                      ${e.faceRegLocked ? '<i class="fas fa-lock text-red-500 text-xs ml-1" title="ถูกล็อค"></i>' : ''}
-                    </div>
-                  </td>
-                  <td class="px-4 py-2.5 flex gap-2 flex-wrap">
-                    <button onclick="openFaceRegister('${e._key}')"
-                      class="text-purple-600 text-xs hover:underline flex items-center gap-1">
-                      <i class="fas fa-camera"></i>${e.faceDescriptor?'ลงใหม่':'ลงทะเบียน'}
-                    </button>
-                    ${(e.faceRegLocked || (e.faceRegCount||0) >= FACE_REG_MAX) ? `
-                    <button onclick="doAdminUnlockFace('${e._key}')"
-                      class="text-orange-500 text-xs hover:underline flex items-center gap-1">
-                      <i class="fas fa-unlock"></i>ปลดล็อค
-                    </button>` : ''}
-                    ${e.faceDescriptor?`
-                    <button onclick="delFaceData('${e._key}')"
-                      class="text-red-400 text-xs hover:underline flex items-center gap-1">
-                      <i class="fas fa-trash"></i>ลบ
-                    </button>`:''}
-                  </td>
-                </tr>`).join('')}
+              <tbody id="face-reg-tbody">
+                ${_buildFaceRegRows(db.employees)}
               </tbody>
             </table>
           </div>
@@ -3975,13 +4376,17 @@ async function pgEmpFaceReg() {
     <!-- How to guide -->
     <div style="background:#fff;border-radius:16px;padding:18px;box-shadow:0 1px 6px rgba(0,0,0,.05);">
       <div style="font-weight:700;color:#1e293b;margin-bottom:12px;font-size:13px;">
-        <i class="fas fa-question-circle" style="color:#7c3aed;margin-right:6px;"></i>วิธีลงทะเบียนใบหน้า
+        <i class="fas fa-shield-alt" style="color:#7c3aed;margin-right:6px;"></i>วิธีลงทะเบียนใบหน้าให้แม่นยำ
       </div>
-      ${['อยู่ในที่ที่มีแสงสว่างเพียงพอ','จ่อใบหน้าให้ตรงกล้อง ห่างประมาณ 30-50 ซม.','ถอดหน้ากากและแว่นกันแดดออก','ระบบจะจับใบหน้าอัตโนมัติ ไม่ต้องกดปุ่มเพิ่มเติม'].map((t,i) =>
+      ${['อยู่ในที่ที่มีแสงสว่างเพียงพอ ไม่มีแสงย้อนหลัง','จ่อใบหน้าให้ตรงกล้อง ห่างประมาณ 30-50 ซม.','ถอดหน้ากากและแว่นกันแดดออก','ระบบจะเก็บตัวอย่าง 5 เฟรมอัตโนมัติ — อยู่นิ่งๆ','ระบบใช้ค่าเฉลี่ย 5 เฟรมเพื่อความแม่นยำสูงสุด'].map((t,i) =>
         `<div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid #f8fafc;">
           <div style="width:22px;height:22px;border-radius:50%;background:#f5f3ff;color:#7c3aed;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;">${i+1}</div>
           <div style="font-size:12px;color:#475569;line-height:1.5;">${t}</div>
         </div>`).join('')}
+      <div style="margin-top:10px;background:#fef9c3;border-radius:10px;padding:10px 12px;font-size:11px;color:#854d0e;">
+        <i class="fas fa-lock" style="margin-right:4px;"></i>
+        ลงทะเบียนได้สูงสุด ${FACE_REG_MAX} ครั้ง ป้องกันการเปลี่ยนข้อมูลโดยไม่ได้รับอนุญาต
+      </div>
     </div>
   </div>`;
 }
@@ -4006,52 +4411,6 @@ window.openEmpFaceScan = async function() {
   await _startFaceCam();
 };
 
-// Override _handleFaceRegister to also update counter and lock
-const _origHandleFaceRegister = window._handleFaceRegisterOrig;
-async function _handleFaceRegister(descriptor) {
-  faceDetecting = false;
-  const isEmpSelf = (faceModalMode === 'emp-register');
-  const empKey = faceRegEmpKey;
-  const emp = db.employees.find(e => e._key === empKey);
-  if (!emp) { setFaceStatus('error', '❌ ไม่พบข้อมูลพนักงาน'); return; }
-
-  setFaceStatus('info', '📸 จับใบหน้าสำเร็จ! กำลังบันทึก...');
-  const overlay = document.getElementById('face-scan-overlay');
-  if (overlay) { overlay.style.display = 'flex'; setTimeout(() => { if(overlay) overlay.style.display = 'none'; }, 1200); }
-
-  const newCount = (emp.faceRegCount || 0) + 1;
-  const willLock = isEmpSelf && newCount >= FACE_REG_MAX;
-  const updatePayload = {
-    faceDescriptor: descriptor,
-    faceRegCount: newCount,
-    ...(isEmpSelf && willLock ? { faceRegLocked: true } : {})
-  };
-
-  try {
-    showSync();
-    await fbPatch('/employees/' + empKey, updatePayload);
-    const idx = db.employees.findIndex(e => e._key === empKey);
-    if (idx >= 0) {
-      db.employees[idx].faceDescriptor = descriptor;
-      db.employees[idx].faceRegCount   = newCount;
-      if (willLock) db.employees[idx].faceRegLocked = true;
-    }
-    faceMatcherDirty = true; // force rebuild
-    hideSync();
-    const msg = willLock
-      ? `✅ บันทึกสำเร็จ! (ครั้งที่ ${newCount}/${FACE_REG_MAX})\nถูกล็อคแล้ว — ติดต่อ HR เพื่อรีเซ็ต`
-      : `✅ บันทึกสำเร็จ! ครั้งที่ ${newCount}/${FACE_REG_MAX}`;
-    setFaceStatus('success', msg);
-    setTimeout(() => {
-      stopFaceCam();
-      if (isEmpSelf) pgEmpFaceReg(); // refresh the page
-    }, 2200);
-  } catch(e) {
-    hideSync();
-    setFaceStatus('error', '❌ บันทึกไม่สำเร็จ: ' + e.message);
-    setTimeout(() => { faceDetecting = true; faceRafHandle = requestAnimationFrame(_faceDetectLoop); }, 2000);
-  }
-}
 
 // =====================================================================
 //  ADMIN UNLOCK FACE REGISTRATION
@@ -4088,13 +4447,18 @@ window.adminUnlockFace = async function(empKey) {
 
 window.doAdminUnlockFace = async function(empKey) {
   showSync();
-  await fbPatch('/employees/' + empKey, { faceRegCount: 0, faceRegLocked: false });
+  await fbPatch('/employees/' + empKey, { faceRegCount: 0, faceRegLocked: false, faceDescriptors: [], faceDescriptor: null });
   const idx = db.employees.findIndex(e => e._key === empKey);
-  if (idx >= 0) { db.employees[idx].faceRegCount = 0; db.employees[idx].faceRegLocked = false; }
+  if (idx >= 0) {
+    db.employees[idx].faceRegCount     = 0;
+    db.employees[idx].faceRegLocked    = false;
+    db.employees[idx].faceDescriptors  = [];
+    db.employees[idx].faceDescriptor   = null;
+  }
   faceMatcherDirty = true;
   hideSync();
   closeModal();
-  alert('✅ ปลดล็อคสำเร็จ พนักงานสามารถลงทะเบียนใบหน้าได้อีกครั้ง');
+  alert('✅ ปลดล็อคสำเร็จ พนักงานสามารถลงทะเบียนใบหน้าได้ใหม่อีกครั้ง');
 };
 
 // =====================================================================
@@ -4300,8 +4664,211 @@ window.adminDoCheckInFor = async function(dateKey) {
   alert(`✅ เช็คชื่อให้ ${emp.name} สำเร็จ · เวลาเข้า ${inT}${outT?' · ออก '+outT:''}`);
 };
 
+// ---- Face registration table helpers ----
+function _buildFaceRegRows(emps) {
+  return emps.map(e => `<tr class="hover:bg-gray-50">
+    <td class="px-4 py-2.5 font-medium">${e.name}</td>
+    <td class="px-4 py-2.5 text-gray-500 text-xs">${e.dept||'-'}</td>
+    <td class="px-4 py-2.5">${e.faceDescriptor ? bdg('green','✓ ลงทะเบียนแล้ว') : bdg('red','ยังไม่ได้ลงทะเบียน')}</td>
+    <td class="px-4 py-2.5">
+      <div class="flex items-center gap-1">
+        <span class="text-xs font-bold ${(e.faceRegCount||0) >= FACE_REG_MAX ? 'text-red-500' : 'text-gray-600'}">${e.faceRegCount||0}/${FACE_REG_MAX}</span>
+        ${e.faceRegLocked ? '<i class="fas fa-lock text-red-500 text-xs ml-1"></i>' : ''}
+      </div>
+    </td>
+    <td class="px-4 py-2.5 flex gap-2 flex-wrap">
+      <button onclick="openFaceRegister('${e._key}')" class="text-purple-600 text-xs hover:underline flex items-center gap-1">
+        <i class="fas fa-camera"></i>${e.faceDescriptor?'ลงใหม่':'ลงทะเบียน'}
+      </button>
+      ${(e.faceRegLocked || (e.faceRegCount||0) >= FACE_REG_MAX) ? `
+      <button onclick="doAdminUnlockFace('${e._key}')" class="text-orange-500 text-xs hover:underline flex items-center gap-1">
+        <i class="fas fa-unlock"></i>ปลดล็อค
+      </button>` : ''}
+      ${e.faceDescriptor ? `
+      <button onclick="delFaceData('${e._key}')" class="text-red-400 text-xs hover:underline flex items-center gap-1">
+        <i class="fas fa-trash"></i>ลบ
+      </button>` : ''}
+    </td>
+  </tr>`).join('');
+}
+window.filterFaceRegTable = q => {
+  const tbody = document.getElementById('face-reg-tbody'); if (!tbody) return;
+  const ql = q.toLowerCase();
+  tbody.innerHTML = _buildFaceRegRows(db.employees.filter(e => !q ||
+    e.name.toLowerCase().includes(ql) || (e.dept||'').toLowerCase().includes(ql)));
+};
+
 // =====================================================================
-//  BOOTSTRAP
+//  REPORT SUPERVISOR — Clickable cards with per-employee details + Export
+// =====================================================================
+function pgRptSup(){
+  const mc=document.getElementById('main-content');
+  const months=getMonths();
+  const mOpts=months.map(m=>`<option value="${m.v}">${m.l}</option>`).join('');
+  mc.innerHTML=`<div class="flex justify-between items-center mb-5">
+    <h3 class="text-base font-bold text-gray-700 border-l-4 border-blue-500 pl-3">สรุปตามหัวหน้างาน</h3>
+    <div class="flex gap-2">
+      <select class="border rounded-lg px-3 py-2 text-sm" id="sup-rpt-month" onchange="loadSupRpt(this.value)">${mOpts}</select>
+    </div>
+  </div><div id="sup-rpt-area"><div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div></div>`;
+  if(months[0])loadSupRpt(months[0].v);
+}
+
+window.loadSupRpt=async function(month){
+  await loadAttendanceMonth(month);
+  const area=document.getElementById('sup-rpt-area');if(!area)return;
+  const sd={};
+  db.supervisors.forEach(s=>{sd[s._key]={...s,empSet:new Set(),days:0,tWage:0,tOt:0,empData:{}};});
+  Object.entries(db.attendance).forEach(([k,bucket])=>{
+    if(!k.startsWith(month))return;
+    Object.values(bucket||{}).forEach(r=>{
+      if(!sd[r.supId])return;
+      sd[r.supId].empSet.add(r.empId);
+      sd[r.supId].days++;
+      sd[r.supId].tWage+=r.total;
+      sd[r.supId].tOt+=r.otPay;
+      if(!sd[r.supId].empData[r.empId]) sd[r.supId].empData[r.empId]={empId:r.empId,empName:r.empName,dept:r.dept,days:0,tWage:0,tOt:0,tTotal:0};
+      sd[r.supId].empData[r.empId].days++;
+      sd[r.supId].empData[r.empId].tWage+=r.wage;
+      sd[r.supId].empData[r.empId].tOt+=r.otPay;
+      sd[r.supId].empData[r.empId].tTotal+=r.total;
+    });
+  });
+
+  const thMonth=getMonths().find(m=>m.v===month)?.l||month;
+
+  area.innerHTML=`
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+    ${Object.values(sd).map(s=>{
+    const subs=db.employees.filter(e=>e.supId===s._key);
+    const empRows=Object.values(s.empData);
+    const empDataJson=JSON.stringify(empRows).replace(/"/g,'&quot;');
+    const supDataJson=JSON.stringify({name:s.name,dept:s.dept||'-',month:thMonth,tWage:s.tWage,tOt:s.tOt,days:s.days}).replace(/"/g,'&quot;');
+    return`<div class="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-100">
+      <!-- Card Header (clickable) -->
+      <div onclick="toggleSupDetail('${s._key}')"
+        style="cursor:pointer;padding:18px 20px;display:flex;justify-content:space-between;align-items:flex-start;transition:background .15s;"
+        onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
+        <div>
+          <div class="font-bold text-gray-800">${s.name}</div>
+          <div class="text-xs text-gray-400 mt-0.5">${s.dept||'-'}</div>
+        </div>
+        <div class="flex items-center gap-2">
+          ${bdg('blue','ลูกน้อง '+subs.length+' คน')}
+          <i id="sup-chevron-${s._key}" class="fas fa-chevron-down text-gray-400 text-xs transition-transform"></i>
+        </div>
+      </div>
+      <!-- Stats row -->
+      <div class="grid grid-cols-3 gap-0 border-t border-gray-100">
+        <div class="p-3 text-center border-r border-gray-100">
+          <div class="text-lg font-bold text-green-700">${s.empSet.size}</div>
+          <div class="text-xs text-gray-400">คนทำงาน</div>
+        </div>
+        <div class="p-3 text-center border-r border-gray-100">
+          <div class="text-lg font-bold text-blue-700">${s.days}</div>
+          <div class="text-xs text-gray-400">Man-Day</div>
+        </div>
+        <div class="p-3 text-center">
+          <div class="text-sm font-bold text-purple-700">฿${s.tWage.toLocaleString()}</div>
+          <div class="text-xs text-gray-400">ค่าแรงรวม</div>
+        </div>
+      </div>
+      <!-- Detail panel (collapsed by default) -->
+      <div id="sup-detail-${s._key}" style="display:none;">
+        <div class="px-4 pb-2 pt-3 flex justify-between items-center border-t border-gray-100">
+          <div class="text-xs font-bold text-gray-500">รายละเอียดรายบุคคล</div>
+          <button onclick="exportSupExcel('${s._key}','${month}')"
+            class="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5">
+            <i class="fas fa-file-excel"></i> Export Excel
+          </button>
+        </div>
+        <div class="overflow-x-auto px-2 pb-3">
+          <table class="min-w-full text-xs">
+            ${THead('พนักงาน','สายงาน','วัน','ค่าแรง','OT','รวม')}
+            <tbody>
+              ${empRows.length===0?`<tr><td colspan="6" class="text-center px-4 py-4 text-gray-400 text-xs">ไม่มีข้อมูล</td></tr>`
+                :empRows.sort((a,b)=>b.tTotal-a.tTotal).map(r=>`<tr class="hover:bg-blue-50">
+                  <td class="px-3 py-2 font-medium">${r.empName}</td>
+                  <td class="px-3 py-2 text-gray-400">${r.dept}</td>
+                  <td class="px-3 py-2 text-center font-bold">${r.days}</td>
+                  <td class="px-3 py-2 text-right">฿${r.tWage.toLocaleString()}</td>
+                  <td class="px-3 py-2 text-right text-yellow-700">${r.tOt>0?'฿'+r.tOt.toLocaleString():'-'}</td>
+                  <td class="px-3 py-2 text-right font-bold text-blue-700">฿${r.tTotal.toLocaleString()}</td>
+                </tr>`).join('')}
+              <tr class="bg-gray-50 font-bold border-t-2 border-gray-200">
+                <td colspan="2" class="px-3 py-2 text-right text-gray-600 text-xs">รวมสายงาน</td>
+                <td class="px-3 py-2 text-center">${s.days}</td>
+                <td class="px-3 py-2 text-right">฿${(s.tWage-s.tOt).toLocaleString()}</td>
+                <td class="px-3 py-2 text-right text-yellow-700">฿${s.tOt.toLocaleString()}</td>
+                <td class="px-3 py-2 text-right text-blue-700">฿${s.tWage.toLocaleString()}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- Name badges -->
+        <div class="px-4 pb-4 border-t border-gray-100 pt-3">
+          <div class="text-xs font-semibold text-gray-500 mb-2">รายชื่อ (${subs.length} คน)</div>
+          <div class="flex flex-wrap gap-1">${subs.map(e=>`<span class="${s.empSet.has(e._key)?'badge-green':'badge-red'} px-2 py-0.5 rounded text-xs">${e.name.replace('นาย ','').replace('นาง ','').replace('น.ส.','')}</span>`).join('')}</div>
+        </div>
+      </div>
+    </div>`;}).join('')}
+    </div>`;
+};
+
+window.toggleSupDetail = function(supKey) {
+  const panel = document.getElementById('sup-detail-'+supKey);
+  const chev  = document.getElementById('sup-chevron-'+supKey);
+  if (!panel) return;
+  const open = panel.style.display === 'none';
+  panel.style.display = open ? 'block' : 'none';
+  if (chev) chev.style.transform = open ? 'rotate(180deg)' : 'rotate(0deg)';
+};
+
+window.exportSupExcel = function(supKey, month) {
+  const s = Object.assign({}, ...db.supervisors.filter(x=>x._key===supKey));
+  const thMonth = getMonths().find(m=>m.v===month)?.l||month;
+  const wb = XLSX.utils.book_new();
+
+  // Build per-employee data
+  const empData={};
+  const dateRecs=[];
+  Object.entries(db.attendance).forEach(([dk,bucket])=>{
+    if(!dk.startsWith(month))return;
+    Object.values(bucket||{}).forEach(r=>{
+      if(r.supId!==supKey)return;
+      if(!empData[r.empId]) empData[r.empId]={empId:r.empId,empName:r.empName,dept:r.dept,days:0,tWage:0,tOt:0,tTotal:0};
+      empData[r.empId].days++; empData[r.empId].tWage+=r.wage; empData[r.empId].tOt+=r.otPay; empData[r.empId].tTotal+=r.total;
+      dateRecs.push({dk,r});
+    });
+  });
+  const rows=Object.values(empData).sort((a,b)=>b.tTotal-a.tTotal);
+  const tD=rows.reduce((s,r)=>s+r.days,0), tW=rows.reduce((s,r)=>s+r.tWage,0), tO=rows.reduce((s,r)=>s+r.tOt,0), tA=rows.reduce((s,r)=>s+r.tTotal,0);
+
+  // Sheet 1: Summary per employee
+  const s1=[
+    [`สรุปการทำงาน — ทีม ${s.name||''} — ${thMonth}`],[],
+    ['พนักงาน','สายงาน','วันทำงาน','ค่าแรงปกติ (฿)','ค่า OT (฿)','รวม (฿)'],
+    ...rows.map(r=>[r.empName,r.dept,r.days,r.tWage,r.tOt,r.tTotal]),
+    [],['รวมทีม','',tD,tW,tO,tA]
+  ];
+  const ws1=XLSX.utils.aoa_to_sheet(s1);
+  ws1['!cols']=[{wch:24},{wch:16},{wch:10},{wch:14},{wch:12},{wch:14}];
+  XLSX.utils.book_append_sheet(wb,ws1,'สรุปรายบุคคล');
+
+  // Sheet 2: Daily detail
+  const s2=[
+    [`รายละเอียดรายวัน — ทีม ${s.name||''} — ${thMonth}`],[],
+    ['วันที่','พนักงาน','สายงาน','เวลาเข้า','เวลาออก','OT','ค่าแรง (฿)','ค่า OT (฿)','รวม (฿)','GPS']
+  ];
+  dateRecs.sort((a,b)=>a.dk.localeCompare(b.dk)).forEach(({dk,r})=>{
+    s2.push([fmtThai(dk),r.empName,r.dept,r.checkInTime||'',r.checkOutTime||'-',r.otHours||0,r.wage,r.otPay,r.total,r.gpsOk?'ตรงจุด':'นอกพื้นที่']);
+  });
+  const ws2=XLSX.utils.aoa_to_sheet(s2);
+  ws2['!cols']=[{wch:16},{wch:24},{wch:16},{wch:10},{wch:10},{wch:8},{wch:12},{wch:12},{wch:12},{wch:12}];
+  XLSX.utils.book_append_sheet(wb,ws2,'รายละเอียดรายวัน');
+
+  XLSX.writeFile(wb,`supervisor_${s.name||supKey}_${month}.xlsx`);
+};
 // =====================================================================
 window.onload=()=>{
   // โหลด remember me จาก localStorage
