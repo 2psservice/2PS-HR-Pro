@@ -346,6 +346,14 @@ async function initApp() {
     const ciMode = await fbGet('/settings/checkinMode');
     if (ciMode) checkinMode = ciMode;
 
+    // Load area-specific check-in methods
+    const areaMethods = await fbGet('/settings/areaCheckinMethods');
+    if (areaMethods && typeof areaMethods === 'object') areaCheckinMethods = areaMethods;
+
+    // Load device bindings
+    const devData = await fbGet('/deviceBindings');
+    if (devData && typeof devData === 'object') deviceBindings = devData;
+
     // Load GPS locations (new multi-location format)
     const gpsData = await fbGet('/settings/gpsLocations');
     if (gpsData && typeof gpsData === 'object') {
@@ -459,6 +467,41 @@ let qrTimer = null, qrExp = null, camStream = null, camScanning = false;
 let hrGPS = { lat: 13.756331, lng: 100.501827, radius: 100 }; // legacy single-loc fallback
 let gpsLocations = []; // array of {id,name,lat,lng,radius}
 window._activeToken = null;
+
+// ===== DEVICE BINDING & AREA METHOD GLOBALS =====
+let areaCheckinMethods = {};  // { locationId: 'qr'|'face'|'both'|'gps_button' }
+let deviceBindings = {};      // { empId: { deviceId, boundAt, boundByName } }
+
+function getDeviceId() {
+  let did = localStorage.getItem('2ps_device_id');
+  if (!did) {
+    did = 'DEV_' + Date.now().toString(36).toUpperCase() + '_' + Math.random().toString(36).substr(2,8).toUpperCase();
+    localStorage.setItem('2ps_device_id', did);
+  }
+  return did;
+}
+function checkDeviceBinding(empId) {
+  const b = deviceBindings[empId];
+  const did = getDeviceId();
+  if (!b || !b.deviceId) return { bound: false, match: false };
+  return { bound: true, match: b.deviceId === did };
+}
+function getEffectiveCheckinMode(empObj) {
+  // ถ้ามีการตั้งค่าวิธีเช็คชื่อรายพื้นที่ → ใช้ค่าแรกที่ตั้งไว้
+  // (เพราะไม่รู้พนักงานอยู่พื้นที่ไหนก่อนเช็ค GPS จริง — ใช้ค่าพื้นที่แรกเป็น default)
+  // Admin สามารถตั้งค่า Global fallback ได้ที่หน้า Area Methods
+  // หากทุกพื้นที่ตั้งค่าเหมือนกัน (เช่น gps_button) จะใช้ค่านั้น
+  const vals = Object.values(areaCheckinMethods);
+  if (vals.length > 0) {
+    // ถ้าทุก zone ตั้งค่าเหมือนกัน → ใช้ค่านั้น
+    const unique = [...new Set(vals)];
+    if (unique.length === 1) return unique[0];
+    // ถ้า zone แรกที่ตั้งค่า gps_button ให้ priority
+    if (vals.some(v => v === 'gps_button')) return 'gps_button';
+    return vals[0];
+  }
+  return checkinMode;
+}
 
 // ===== FACE RECOGNITION GLOBALS =====
 const FACE_MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights';
@@ -677,6 +720,8 @@ function getMenus(role){
     {div:1,label:'ตั้งค่า'},
     {tab:'gps-locations',icon:'fas fa-map-marked-alt',label:'กำหนดพื้นที่เข้างาน',c:'text-cyan-400'},
     {tab:'checkin-settings',icon:'fas fa-id-badge',label:'วิธีเช็คชื่อ / ใบหน้า',c:'text-purple-400'},
+    {tab:'area-methods',icon:'fas fa-map-pin',label:'วิธีเช็คชื่อรายพื้นที่',c:'text-orange-400'},
+    {tab:'device-bindings',icon:'fas fa-shield-alt',label:'Device Binding',c:'text-red-400'},
     {tab:'manage-pwd',icon:'fas fa-key',label:'จัดการรหัสผ่าน'},
     {div:1,label:'จำลองระบบ'},
     {tab:'qr-page',icon:'fas fa-qrcode',label:'หน้าจอหัวหน้างาน',c:'text-blue-400'},
@@ -699,8 +744,9 @@ function getMenus(role){
     ];
   }
   // Employee menu — checkin tab icon/label depends on mode
-  const empCiIcon  = checkinMode==='face'?'fas fa-smile':checkinMode==='both'?'fas fa-id-badge':'fas fa-qrcode';
-  const empCiLabel = checkinMode==='face'?'สแกนใบหน้า':checkinMode==='both'?'เช็คชื่อเข้างาน':'สแกน QR เข้างาน';
+  const effMode = getEffectiveCheckinMode({});
+  const empCiIcon  = effMode==='gps_button'?'fas fa-map-marker-alt':effMode==='face'?'fas fa-smile':effMode==='both'?'fas fa-id-badge':'fas fa-qrcode';
+  const empCiLabel = effMode==='gps_button'?'กดเข้างาน + GPS':effMode==='face'?'สแกนใบหน้า':effMode==='both'?'เช็คชื่อเข้างาน':'สแกน QR เข้างาน';
   return[
     {tab:'emp-home',icon:'fas fa-home',label:'หน้าหลัก'},
     {tab:'checkin-page',icon:empCiIcon,label:empCiLabel,c:'text-green-400'},
@@ -735,6 +781,7 @@ function renderPage(tab){
     dashboard:pgDashboard,depts:pgDepts,sups:pgSups,emps:pgEmps,wages:pgWages,
     'rpt-daily':pgRptDaily,'rpt-monthly':pgRptMonthly,'rpt-sup':pgRptSup,'rpt-emp':pgRptEmp,
     'manage-pwd':pgManagePwd,'checkin-settings':pgCheckinSettings,
+    'area-methods':pgAreaMethods,'device-bindings':pgDeviceBindings,
     'gps-locations':pgGpsLocations,
     'qr-page':pgQR,'checkin-page':pgCheckin,
     'sup-dash':pgSupDash,'sup-emps':()=>pgEmps(CU.id),'add-emp-page':pgAddEmpForm,
@@ -2438,23 +2485,38 @@ function _renderCheckinReady(wrap, empObj) {
         <span><i class="fas fa-user-tie" style="margin-right:3px;opacity:.7;"></i>${empObj.sup||'-'}</span>
       </div>
     </div>
-    <!-- ปุ่มสแกนใหญ่ -->
-    ${(checkinMode==='qr'||checkinMode==='both')?`
-    <button id="btn-scan" onclick="openCam()"
-      style="width:100%;background:#16a34a;color:#fff;border:none;border-radius:20px;padding:26px 20px;font-size:22px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:14px;font-family:Sarabun,sans-serif;box-shadow:0 6px 20px rgba(22,163,74,.35);margin-bottom:16px;transition:opacity .15s;"
-      onmousedown="this.style.opacity='.85'" onmouseup="this.style.opacity='1'" ontouchstart="this.style.opacity='.85'" ontouchend="this.style.opacity='1'">
-      <i class="fas fa-qrcode" style="font-size:26px;"></i>
-      สแกน QR Code เข้างาน
-    </button>`:''}
-    ${(checkinMode==='face'||checkinMode==='both')?`
-    <button id="btn-face" onclick="openFaceScan()"
-      style="width:100%;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none;border-radius:20px;padding:26px 20px;font-size:22px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:14px;font-family:Sarabun,sans-serif;box-shadow:0 6px 20px rgba(22,163,74,.35);margin-bottom:16px;transition:opacity .15s;"
-      onmousedown="this.style.opacity='.85'" onmouseup="this.style.opacity='1'" ontouchstart="this.style.opacity='.85'" ontouchend="this.style.opacity='1'">
-      <i class="fas fa-smile" style="font-size:26px;"></i>
-      สแกนใบหน้าเข้างาน
-    </button>`:''}
-    ${checkinMode==='both'?`<div style="text-align:center;font-size:12px;color:#94a3b8;margin-bottom:4px;">เลือกวิธีเช็คชื่อได้ตามต้องการ</div>`:''}
-    <!-- สถานะ (ซ่อนไว้จนกว่าจะใช้) -->
+    <!-- ปุ่มเช็คชื่อ — รองรับทุกโหมด รวม gps_button -->
+    ${(()=>{
+      const em=getEffectiveCheckinMode(empObj);
+      const isGps=em==='gps_button';
+      if(isGps) return `
+        <div id="gps-device-info" style="background:#fff3cd;border:1px solid #ffc107;border-radius:14px;padding:12px 16px;margin-bottom:12px;font-size:12px;color:#856404;display:flex;align-items:center;gap:8px;">
+          <i class="fas fa-shield-alt" style="font-size:16px;color:#f59e0b;flex-shrink:0;"></i>
+          <span id="device-bind-status">⏳ กำลังตรวจสอบ Device Binding...</span>
+        </div>
+        <button id="btn-gps-checkin" onclick="doGpsButtonCheckin()" disabled
+          style="width:100%;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none;border-radius:20px;padding:26px 20px;font-size:22px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:14px;font-family:Sarabun,sans-serif;box-shadow:0 6px 20px rgba(22,163,74,.35);margin-bottom:16px;transition:all .2s;opacity:.5;"
+          onmousedown="this.style.opacity='.85'" onmouseup="this.style.opacity='1'" ontouchstart="this.style.opacity='.85'" ontouchend="this.style.opacity='1'">
+          <i class="fas fa-map-marker-alt" style="font-size:26px;"></i>
+          กดเข้างาน + GPS
+        </button>`;
+      return (em==='qr'||em==='both'?`
+        <button id="btn-scan" onclick="openCam()"
+          style="width:100%;background:#16a34a;color:#fff;border:none;border-radius:20px;padding:26px 20px;font-size:22px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:14px;font-family:Sarabun,sans-serif;box-shadow:0 6px 20px rgba(22,163,74,.35);margin-bottom:16px;transition:opacity .15s;"
+          onmousedown="this.style.opacity='.85'" onmouseup="this.style.opacity='1'" ontouchstart="this.style.opacity='.85'" ontouchend="this.style.opacity='1'">
+          <i class="fas fa-qrcode" style="font-size:26px;"></i>
+          สแกน QR Code เข้างาน
+        </button>`:'')+
+        (em==='face'||em==='both'?`
+        <button id="btn-face" onclick="openFaceScan()"
+          style="width:100%;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none;border-radius:20px;padding:26px 20px;font-size:22px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:14px;font-family:Sarabun,sans-serif;box-shadow:0 6px 20px rgba(22,163,74,.35);margin-bottom:16px;transition:opacity .15s;"
+          onmousedown="this.style.opacity='.85'" onmouseup="this.style.opacity='1'" ontouchstart="this.style.opacity='.85'" ontouchend="this.style.opacity='1'">
+          <i class="fas fa-smile" style="font-size:26px;"></i>
+          สแกนใบหน้าเข้างาน
+        </button>`:'')+
+        (em==='both'?'<div style="text-align:center;font-size:12px;color:#94a3b8;margin-bottom:4px;">เลือกวิธีเช็คชื่อได้ตามต้องการ</div>':'')
+    })()}
+    <!-- สถานะ -->
     <div id="ci-status" style="display:none;padding:14px 18px;border-radius:14px;font-size:14px;font-weight:600;text-align:center;margin-bottom:16px;"></div>
     <!-- ประวัติล่าสุด -->
     <div id="ci-hist-wrap">
@@ -2472,6 +2534,8 @@ function _renderCheckinReady(wrap, empObj) {
   const clockInterval = setInterval(tick, 1000);
   // โหลดประวัติ
   _loadRecentHistory(empObj);
+  // ถ้าเป็น gps_button ให้ตรวจสอบ device binding
+  if(getEffectiveCheckinMode(empObj)==='gps_button') _checkAndEnableGpsBtn(empObj);
 }
 
 // ---- โหลดประวัติเข้างาน (เดือนปัจจุบัน) ----
@@ -2597,18 +2661,7 @@ function _renderCheckinDone(wrap, empObj, alr) {
       ${alr.checkOutTime
         ? `<div style="padding:12px 18px 18px;"><div style="background:#fef2f2;border-radius:10px;padding:10px 14px;text-align:center;font-size:13px;font-weight:700;color:#dc2626;"><i class="fas fa-sign-out-alt" style="margin-right:6px;"></i>ออกงานแล้ว ${alr.checkOutTime} น.</div></div>`
         : `<div style="padding:10px 18px 18px;">
-            ${(checkinMode==='qr'||checkinMode==='both')?`
-            <button id="btn-checkout" onclick="openCamCheckout()"
-              style="width:100%;background:#dc2626;color:#fff;border:none;border-radius:14px;padding:16px 20px;font-size:17px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:12px;font-family:Sarabun,sans-serif;transition:opacity .15s;margin-bottom:${(checkinMode==='both')?'10px':'0'};"
-              onmousedown="this.style.opacity='.85'" onmouseup="this.style.opacity='1'" ontouchstart="this.style.opacity='.85'" ontouchend="this.style.opacity='1'">
-              <i class="fas fa-qrcode" style="font-size:20px;"></i> สแกน QR ออกงาน
-            </button>`:''}
-            ${(checkinMode==='face'||checkinMode==='both')?`
-            <button id="btn-face-checkout" onclick="openFaceScanCheckout()"
-              style="width:100%;background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;border:none;border-radius:14px;padding:16px 20px;font-size:17px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:12px;font-family:Sarabun,sans-serif;transition:opacity .15s;"
-              onmousedown="this.style.opacity='.85'" onmouseup="this.style.opacity='1'" ontouchstart="this.style.opacity='.85'" ontouchend="this.style.opacity='1'">
-              <i class="fas fa-smile" style="font-size:20px;"></i> สแกนใบหน้าออกงาน
-            </button>`:''}
+            ${_buildCheckoutButtons(empObj)}
             <div id="ci-status" style="display:none;margin-top:10px;padding:12px;border-radius:12px;font-size:13px;font-weight:600;text-align:center;"></div>
           </div>`}
     </div>
@@ -2619,9 +2672,11 @@ function _renderCheckinDone(wrap, empObj, alr) {
       </div>
     </div>`;
   _loadRecentHistory(empObj);
+  // GPS button mode: enable checkout button after render
+  if (getEffectiveCheckinMode(empObj) === 'gps_button' && !alr.checkOutTime) {
+    setTimeout(() => _checkAndEnableGpsBtnCo(empObj), 80);
+  }
 }
-
-// ---- Non-employee (admin/sup) full UI ----
 function _pgCheckinFull(mc){
   mc.innerHTML=`<div class="max-w-sm mx-auto mt-2">
     <div class="bg-white rounded-xl shadow-sm p-6 border-t-4 border-green-500">
@@ -4219,9 +4274,10 @@ async function pgCheckinSettings() {
           <p class="text-sm text-gray-500 mb-5">กำหนดวิธีที่พนักงานใช้เช็คชื่อเข้า-ออกงาน ระบบจะแสดงปุ่มที่หน้าเช็คชื่อพนักงานตามการตั้งค่านี้</p>
           <div class="space-y-3 mb-5">
             ${[
-              {v:'qr',   icon:'fa-qrcode',      col:'#2563eb','bg':'#eff6ff','bc':'#3b82f6', title:'QR Code เท่านั้น',           desc:'หัวหน้างานสร้าง QR แล้วพนักงานสแกน — วิธีมาตรฐาน'},
-              {v:'face', icon:'fa-smile',        col:'#7c3aed','bg':'#f5f3ff','bc':'#8b5cf6', title:'สแกนใบหน้า เท่านั้น',        desc:'ใช้ TensorFlow.js วิเคราะห์ใบหน้าในเบราว์เซอร์ ข้อมูลไม่ออกนอกระบบ'},
-              {v:'both', icon:'fa-layer-group',  col:'#16a34a','bg':'#f0fdf4','bc':'#22c55e', title:'ทั้ง QR และใบหน้า',          desc:'พนักงานเลือกวิธีได้เองทั้งสองแบบ'}
+              {v:'qr',         icon:'fa-qrcode',        col:'#2563eb','bg':'#eff6ff','bc':'#3b82f6', title:'QR Code เท่านั้น',           desc:'หัวหน้างานสร้าง QR แล้วพนักงานสแกน — วิธีมาตรฐาน'},
+              {v:'face',       icon:'fa-smile',          col:'#7c3aed','bg':'#f5f3ff','bc':'#8b5cf6', title:'สแกนใบหน้า เท่านั้น',        desc:'ใช้ TensorFlow.js วิเคราะห์ใบหน้าในเบราว์เซอร์ ข้อมูลไม่ออกนอกระบบ'},
+              {v:'both',       icon:'fa-layer-group',    col:'#16a34a','bg':'#f0fdf4','bc':'#22c55e', title:'ทั้ง QR และใบหน้า',          desc:'พนักงานเลือกวิธีได้เองทั้งสองแบบ'},
+              {v:'gps_button', icon:'fa-map-marker-alt', col:'#dc2626','bg':'#fef2f2','bc':'#f87171', title:'กดปุ่มเข้างาน + GPS',        desc:'โหมดโรงงาน — ไม่ต้องสแกน ใช้ Device Binding ป้องกันฝากเพื่อน'},
             ].map(opt=>`
               <label style="display:flex;align-items:flex-start;gap:12px;padding:16px;border-radius:14px;cursor:pointer;border:2px solid ${checkinMode===opt.v?opt.bc:'#e5e7eb'};background:${checkinMode===opt.v?opt.bg:'#fff'};transition:all .2s;"
                 onclick="this.querySelector('input').checked=true;previewCIMode('${opt.v}')">
@@ -4286,7 +4342,7 @@ window.saveCheckinMode = async function() {
   showSync();
   await fbSet('/settings/checkinMode', val);
   hideSync();
-  const label = { qr:'QR Code', face:'สแกนใบหน้า', both:'ทั้งสองวิธี' };
+  const label = { qr:'QR Code', face:'สแกนใบหน้า', both:'ทั้งสองวิธี', gps_button:'กดปุ่ม + GPS' };
   alert('✅ บันทึกสำเร็จ — วิธีเช็คชื่อ: ' + label[val]);
 };
 
@@ -4869,6 +4925,423 @@ window.exportSupExcel = function(supKey, month) {
 
   XLSX.writeFile(wb,`supervisor_${s.name||supKey}_${month}.xlsx`);
 };
+// =====================================================================
+//  DEVICE BINDING — helper functions
+// =====================================================================
+
+async function _checkAndEnableGpsBtn(empObj) {
+  const statusEl = document.getElementById('device-bind-status');
+  const btn = document.getElementById('btn-gps-checkin');
+  if (!statusEl || !btn) return;
+  const did = getDeviceId();
+  const b = deviceBindings[empObj._key];
+  if (!b || !b.deviceId) {
+    // ยังไม่ได้ผูก → ผูกอุปกรณ์นี้เลย (ครั้งแรก)
+    statusEl.innerHTML = '⏳ กำลังผูกอุปกรณ์ครั้งแรก...';
+    const payload = { deviceId: did, boundAt: new Date().toISOString(), empName: empObj.name };
+    try {
+      await fbSet('/deviceBindings/' + empObj._key, payload);
+      deviceBindings[empObj._key] = payload;
+      statusEl.innerHTML = `<i class="fas fa-check-circle" style="color:#16a34a;"></i> <b>ผูกอุปกรณ์นี้แล้ว</b> — Device ID: ${did.slice(0,18)}...`;
+      document.getElementById('gps-device-info').style.background = '#dcfce7';
+      document.getElementById('gps-device-info').style.borderColor = '#86efac';
+      document.getElementById('gps-device-info').style.color = '#15803d';
+      btn.disabled = false; btn.style.opacity = '1';
+    } catch(e) {
+      statusEl.innerHTML = '❌ ผูกอุปกรณ์ไม่สำเร็จ: ' + e.message;
+    }
+  } else if (b.deviceId === did) {
+    // ผูกแล้ว — อุปกรณ์ตรงกัน ✓
+    statusEl.innerHTML = `<i class="fas fa-shield-alt" style="color:#16a34a;"></i> <b>อุปกรณ์ได้รับการยืนยัน</b> — Device ถูกต้อง`;
+    document.getElementById('gps-device-info').style.background = '#dcfce7';
+    document.getElementById('gps-device-info').style.borderColor = '#86efac';
+    document.getElementById('gps-device-info').style.color = '#15803d';
+    btn.disabled = false; btn.style.opacity = '1';
+  } else {
+    // อุปกรณ์ไม่ตรง → บล็อก
+    statusEl.innerHTML = `<i class="fas fa-ban" style="color:#dc2626;"></i> <b>อุปกรณ์ไม่ตรง!</b> บัญชีนี้ผูกกับอุปกรณ์อื่นแล้ว ติดต่อ Admin`;
+    document.getElementById('gps-device-info').style.background = '#fee2e2';
+    document.getElementById('gps-device-info').style.borderColor = '#fca5a5';
+    document.getElementById('gps-device-info').style.color = '#991b1b';
+    btn.disabled = true; btn.style.opacity = '.4'; btn.style.cursor = 'not-allowed';
+  }
+}
+
+
+function _buildCheckoutButtons(empObj) {
+  const em = getEffectiveCheckinMode(empObj);
+  const mb10 = 'margin-bottom:10px;';
+  const btnBase = 'border:none;border-radius:14px;padding:16px 20px;font-size:17px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:12px;font-family:Sarabun,sans-serif;transition:all .2s;width:100%;color:#fff;';
+  const mouseEvts = 'onmousedown="this.style.opacity=\'.85\'" onmouseup="this.style.opacity=\'1\'" ontouchstart="this.style.opacity=\'.85\'" ontouchend="this.style.opacity=\'1\'"';
+  if (em === 'gps_button') {
+    return '<div id="gps-device-info-co" style="background:#fff3cd;border:1px solid #ffc107;border-radius:12px;padding:10px 14px;' + mb10 + 'font-size:12px;color:#856404;display:flex;align-items:center;gap:8px;"><i class="fas fa-shield-alt" style="color:#f59e0b;flex-shrink:0;"></i><span id="device-bind-status-co">⏳ กำลังตรวจสอบ Device Binding...</span></div>'
+      + '<button id="btn-gps-checkout" onclick="doGpsButtonCheckout()" disabled style="' + btnBase + 'background:linear-gradient(135deg,#dc2626,#b91c1c);opacity:.5;" ' + mouseEvts + '><i class="fas fa-map-marker-alt" style="font-size:20px;"></i>&nbsp;กดออกงาน + GPS</button>';
+  }
+  let html = '';
+  if (em === 'qr' || em === 'both') {
+    const mb = em === 'both' ? mb10 : '';
+    html += '<button id="btn-checkout" onclick="openCamCheckout()" style="' + btnBase + 'background:#dc2626;' + mb + '" ' + mouseEvts + '><i class="fas fa-qrcode" style="font-size:20px;"></i>&nbsp;สแกน QR ออกงาน</button>';
+  }
+  if (em === 'face' || em === 'both') {
+    html += '<button id="btn-face-checkout" onclick="openFaceScanCheckout()" style="' + btnBase + 'background:linear-gradient(135deg,#dc2626,#b91c1c);" ' + mouseEvts + '><i class="fas fa-smile" style="font-size:20px;"></i>&nbsp;สแกนใบหน้าออกงาน</button>';
+  }
+  return html;
+}
+
+async function _checkAndEnableGpsBtnCo(empObj) {
+  const statusEl = document.getElementById('device-bind-status-co');
+  const btn = document.getElementById('btn-gps-checkout');
+  if (!statusEl || !btn) return;
+  const did = getDeviceId();
+  const b = deviceBindings[empObj._key];
+  if (b && b.deviceId === did) {
+    statusEl.innerHTML = `<i class="fas fa-shield-alt" style="color:#16a34a;"></i> <b>อุปกรณ์ได้รับการยืนยัน</b>`;
+    document.getElementById('gps-device-info-co').style.background = '#dcfce7';
+    document.getElementById('gps-device-info-co').style.borderColor = '#86efac';
+    document.getElementById('gps-device-info-co').style.color = '#15803d';
+    btn.disabled = false; btn.style.opacity = '1';
+  } else if (!b || !b.deviceId) {
+    statusEl.innerHTML = `⚠️ ยังไม่ได้ผูก Device — กรุณาเช็คชื่อเข้างานก่อน`;
+  } else {
+    statusEl.innerHTML = `<i class="fas fa-ban" style="color:#dc2626;"></i> <b>อุปกรณ์ไม่ตรง!</b> ติดต่อ Admin`;
+    document.getElementById('gps-device-info-co').style.background = '#fee2e2';
+    document.getElementById('gps-device-info-co').style.borderColor = '#fca5a5';
+    document.getElementById('gps-device-info-co').style.color = '#991b1b';
+  }
+}
+
+// GPS Button Check-IN
+window.doGpsButtonCheckin = async function() {
+  const btn = document.getElementById('btn-gps-checkin');
+  const statusEl = document.getElementById('ci-status');
+  const empObj = db.employees.find(e => e._key === CU.id);
+  if (!empObj) return;
+  // Double-check device binding
+  const bc = checkDeviceBinding(empObj._key);
+  if (bc.bound && !bc.match) {
+    if (statusEl) { statusEl.style.display='block'; statusEl.className='mt-3 p-4 rounded-xl text-sm font-medium bg-red-50 text-red-700 text-center'; statusEl.innerHTML='🚫 อุปกรณ์ไม่ตรงกัน ไม่สามารถเช็คชื่อได้'; }
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.style.opacity = '.6'; }
+  if (statusEl) { statusEl.style.display='block'; statusEl.className=''; statusEl.style.cssText='display:block;padding:14px 18px;border-radius:14px;font-size:14px;font-weight:600;text-align:center;background:#eff6ff;color:#1d4ed8;margin-bottom:16px;'; statusEl.innerHTML='<i class="fas fa-map-marker-alt fa-spin" style="margin-right:6px;"></i>กำลังตรวจสอบตำแหน่ง GPS...'; }
+  const gpsResult = await _getGpsResult();
+  if (!gpsResult.available) {
+    if (statusEl) { statusEl.style.cssText='display:block;padding:14px;border-radius:14px;background:#fef2f2;border:2px solid #fecaca;text-align:center;font-size:13px;margin-bottom:16px;'; statusEl.innerHTML='🚫 ไม่สามารถดึงตำแหน่งได้<br><span style="font-size:11px;color:#b91c1c;">กรุณาเปิด GPS และอนุญาตการเข้าถึงตำแหน่ง</span>'; }
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    return;
+  }
+  if (!gpsResult.ok) {
+    if (statusEl) { statusEl.style.cssText='display:block;padding:14px;border-radius:14px;background:#fef2f2;border:2px solid #fecaca;text-align:center;margin-bottom:16px;'; statusEl.innerHTML=`<div style="font-size:20px;margin-bottom:6px;">🚫</div><div style="font-weight:700;color:#991b1b;margin-bottom:4px;">อยู่นอกพื้นที่ทำงาน</div><div style="font-size:12px;color:#b91c1c;">ระยะห่าง <b>${Math.round(gpsResult.dist)} ม.</b></div>`; }
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    return;
+  }
+  // GPS OK → บันทึก
+  const now = new Date(), ts = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  const wage = empObj.wage||db.wage.defaultWage;
+  const rec = { empId:empObj._key, empName:empObj.name, dept:empObj.dept, sup:empObj.sup, supId:empObj.supId||'',
+    checkInTime:ts, otHours:0, wage, otPay:0, total:wage, gpsOk:true, distMeters:Math.round(gpsResult.dist),
+    checkinMethod:'gps_button', deviceId:getDeviceId(), timestamp:Date.now() };
+  showSync();
+  try {
+    const res = await fbPush('/attendance/' + todayStr, rec);
+    if (!db.attendance[todayStr]) db.attendance[todayStr] = {};
+    db.attendance[todayStr][res.name] = rec;
+    hideSync();
+    const wrap = document.getElementById('ci-page');
+    if (wrap) _renderCheckinDone(wrap, empObj, rec);
+    refreshAttendList();
+  } catch(e) {
+    hideSync();
+    if (statusEl) { statusEl.style.cssText='display:block;padding:14px;border-radius:14px;background:#fef2f2;text-align:center;font-size:13px;margin-bottom:16px;'; statusEl.innerHTML='❌ บันทึกไม่สำเร็จ: '+e.message; }
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+  }
+};
+
+// GPS Button Check-OUT
+window.doGpsButtonCheckout = async function() {
+  const btn = document.getElementById('btn-gps-checkout');
+  const statusEl = document.getElementById('ci-status');
+  const empObj = db.employees.find(e => e._key === CU.id);
+  if (!empObj) return;
+  const bc = checkDeviceBinding(empObj._key);
+  if (bc.bound && !bc.match) {
+    if (statusEl) { statusEl.style.display='block'; statusEl.style.cssText='display:block;margin-top:10px;padding:12px;border-radius:12px;background:#fef2f2;font-size:13px;font-weight:600;text-align:center;'; statusEl.innerHTML='🚫 อุปกรณ์ไม่ตรงกัน'; }
+    return;
+  }
+  if (btn) { btn.disabled=true; btn.style.opacity='.6'; }
+  if (statusEl) { statusEl.style.cssText='display:block;margin-top:10px;padding:12px;border-radius:12px;background:#eff6ff;color:#1d4ed8;font-size:13px;font-weight:600;text-align:center;'; statusEl.innerHTML='<i class="fas fa-map-marker-alt fa-spin" style="margin-right:6px;"></i>กำลังตรวจสอบตำแหน่ง...'; }
+  const gpsResult = await _getGpsResult();
+  if (!gpsResult.available) {
+    if (statusEl) { statusEl.style.background='#fef2f2'; statusEl.style.color='#991b1b'; statusEl.innerHTML='🚫 ไม่สามารถดึงตำแหน่งได้'; }
+    if (btn) { btn.disabled=false; btn.style.opacity='1'; }
+    return;
+  }
+  if (!gpsResult.ok) {
+    if (statusEl) { statusEl.style.background='#fef2f2'; statusEl.style.color='#991b1b'; statusEl.innerHTML=`🚫 อยู่นอกพื้นที่ (${Math.round(gpsResult.dist)} ม.)`; }
+    if (btn) { btn.disabled=false; btn.style.opacity='1'; }
+    return;
+  }
+  await loadAttendanceDate(todayStr);
+  const bucket = db.attendance[todayStr]||{};
+  const recKey = Object.entries(bucket).find(([,v])=>v.empId===empObj._key)?.[0];
+  if (!recKey) { if (statusEl) { statusEl.style.background='#fef9c3'; statusEl.style.color='#854d0e'; statusEl.innerHTML='⚠️ ไม่พบข้อมูลการเช็คชื่อวันนี้'; } return; }
+  const now = new Date(), ts = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  showSync();
+  try {
+    await fbPatch('/attendance/'+todayStr+'/'+recKey, { checkOutTime:ts, checkOutGps:true, checkOutDist:Math.round(gpsResult.dist), checkOutMethod:'gps_button' });
+    db.attendance[todayStr][recKey].checkOutTime = ts;
+    db.attendance[todayStr][recKey].checkOutGps = true;
+    hideSync();
+    const wrap = document.getElementById('ci-page');
+    if (wrap) _renderCheckoutDone(wrap, empObj, {...db.attendance[todayStr][recKey]});
+    refreshAttendList();
+  } catch(e) {
+    hideSync();
+    if (statusEl) { statusEl.style.background='#fef2f2'; statusEl.style.color='#991b1b'; statusEl.innerHTML='❌ บันทึกไม่สำเร็จ: '+e.message; }
+    if (btn) { btn.disabled=false; btn.style.opacity='1'; }
+  }
+};
+
+// GPS checkout hook handled in PATCH section below
+
+// =====================================================================
+//  AREA METHODS PAGE (Admin)
+// =====================================================================
+async function pgAreaMethods() {
+  const mc = document.getElementById('main-content');
+  mc.innerHTML = `<div id="am-body"><div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div></div>`;
+  // Reload
+  const [amData, gpsData] = await Promise.all([
+    fbGet('/settings/areaCheckinMethods'),
+    fbGet('/settings/gpsLocations')
+  ]);
+  if (amData && typeof amData === 'object') areaCheckinMethods = amData;
+  if (gpsData && typeof gpsData === 'object') gpsLocations = Object.entries(gpsData).map(([k,v])=>({id:k,...v}));
+  const el = document.getElementById('am-body'); if (!el) return;
+
+  const modeOpts = [
+    {v:'qr',         icon:'fa-qrcode',        col:'#2563eb', label:'QR Code',             desc:'หัวหน้าสร้าง QR พนักงานสแกน'},
+    {v:'face',       icon:'fa-smile',          col:'#7c3aed', label:'สแกนใบหน้า',          desc:'TensorFlow.js — ใบหน้าในเบราว์เซอร์'},
+    {v:'both',       icon:'fa-layer-group',    col:'#16a34a', label:'QR + ใบหน้า',         desc:'พนักงานเลือกเองได้'},
+    {v:'gps_button', icon:'fa-map-marker-alt', col:'#dc2626', label:'กดปุ่ม + GPS',        desc:'โหมดโรงงาน — Device Binding, ไม่ต้องสแกน'},
+  ];
+
+  if (!gpsLocations.length) {
+    el.innerHTML = `<div class="bg-yellow-50 border border-yellow-200 rounded-xl p-6 text-center">
+      <i class="fas fa-map-marked-alt text-4xl text-yellow-400 mb-3 block"></i>
+      <p class="text-yellow-700 font-bold mb-2">ยังไม่มีพื้นที่เข้างาน</p>
+      <p class="text-yellow-600 text-sm mb-4">กรุณาเพิ่มพื้นที่ GPS ก่อน แล้วกลับมาตั้งค่าวิธีเช็คชื่อรายพื้นที่</p>
+      <button onclick="goTab('gps-locations',document.querySelector('[data-tab=\\'gps-locations\\']'))"
+        class="bg-cyan-600 text-white px-5 py-2 rounded-lg text-sm font-bold">
+        <i class="fas fa-map-marked-alt mr-1"></i> ไปกำหนดพื้นที่
+      </button>
+    </div>`;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="max-w-3xl">
+      <div class="bg-orange-50 border border-orange-200 rounded-xl p-4 mb-6 flex gap-3">
+        <i class="fas fa-info-circle text-orange-500 text-xl flex-shrink-0 mt-0.5"></i>
+        <div class="text-sm text-orange-800">
+          <b>ตั้งค่าวิธีเช็คชื่อแยกตามพื้นที่ทำงาน</b> — แต่ละ GPS Zone สามารถใช้วิธีเช็คชื่อที่แตกต่างกันได้
+          โหมด <b>"กดปุ่ม + GPS"</b> เหมาะกับโรงงานที่ไม่สามารถสแกนหน้าได้ ใช้ Device Binding ป้องกันการฝากเพื่อน
+        </div>
+      </div>
+      <div class="space-y-4" id="am-list">
+        ${gpsLocations.map(loc => {
+          const cur = areaCheckinMethods[loc.id] || checkinMode;
+          return `
+          <div style="background:#fff;border-radius:16px;box-shadow:0 1px 6px rgba(0,0,0,.07);overflow:hidden;">
+            <!-- Header พื้นที่ -->
+            <div style="background:linear-gradient(135deg,#0f172a,#1e3a5f);padding:14px 18px;display:flex;align-items:center;gap:10px;">
+              <i class="fas fa-map-marker-alt" style="color:#22d3ee;font-size:18px;"></i>
+              <div>
+                <div style="color:#f1f5f9;font-weight:700;font-size:15px;">${loc.name||'ไม่มีชื่อ'}</div>
+                <div style="color:#94a3b8;font-size:11px;"><i class="fas fa-crosshairs" style="margin-right:3px;"></i>${loc.lat?.toFixed(5)||'-'}, ${loc.lng?.toFixed(5)||'-'} · รัศมี ${loc.radius||100} ม.</div>
+              </div>
+            </div>
+            <!-- เลือกวิธี -->
+            <div style="padding:16px 18px;">
+              <div style="font-size:12px;color:#64748b;margin-bottom:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;">วิธีเช็คชื่อสำหรับพื้นที่นี้</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                ${modeOpts.map(opt => `
+                  <label style="display:flex;align-items:flex-start;gap:10px;padding:12px;border-radius:12px;cursor:pointer;border:2px solid ${cur===opt.v?opt.col:'#e5e7eb'};background:${cur===opt.v?opt.col+'15':'#f8fafc'};transition:all .15s;"
+                    onclick="this.querySelector('input').checked=true;updateAreaPreview('${loc.id}','${opt.v}')">
+                    <input type="radio" name="am-${loc.id}" value="${opt.v}" ${cur===opt.v?'checked':''} style="accent-color:${opt.col};margin-top:2px;">
+                    <div>
+                      <div style="font-weight:700;font-size:13px;color:#1e293b;display:flex;align-items:center;gap:5px;">
+                        <i class="fas ${opt.icon}" style="color:${opt.col};font-size:12px;"></i> ${opt.label}
+                      </div>
+                      <div style="font-size:11px;color:#64748b;margin-top:2px;">${opt.desc}</div>
+                    </div>
+                  </label>`).join('')}
+              </div>
+              <button onclick="saveAreaMethod('${loc.id}')"
+                style="margin-top:12px;background:#f59e0b;color:#fff;border:none;border-radius:10px;padding:9px 20px;font-size:13px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;display:flex;align-items:center;gap:6px;">
+                <i class="fas fa-save"></i> บันทึกพื้นที่นี้
+              </button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+window.updateAreaPreview = function(locId, val) {
+  // visual feedback only
+};
+
+window.saveAreaMethod = async function(locId) {
+  const val = document.querySelector(`input[name="am-${locId}"]:checked`)?.value;
+  if (!val) return;
+  areaCheckinMethods[locId] = val;
+  showSync();
+  await fbSet('/settings/areaCheckinMethods/' + locId, val);
+  hideSync();
+  const loc = gpsLocations.find(l => l.id === locId);
+  const label = {qr:'QR Code', face:'สแกนใบหน้า', both:'QR + ใบหน้า', gps_button:'กดปุ่ม + GPS'};
+  const btn = event?.target || document.activeElement;
+  if (btn) { const orig = btn.innerHTML; btn.innerHTML = '<i class="fas fa-check"></i> บันทึกแล้ว!'; btn.style.background='#16a34a'; setTimeout(()=>{ btn.innerHTML=orig; btn.style.background='#f59e0b'; },1800); }
+};
+
+// =====================================================================
+//  DEVICE BINDINGS PAGE (Admin)
+// =====================================================================
+async function pgDeviceBindings() {
+  const mc = document.getElementById('main-content');
+  mc.innerHTML = `<div id="db-body"><div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div></div>`;
+  const devData = await fbGet('/deviceBindings');
+  if (devData && typeof devData === 'object') deviceBindings = devData;
+  const el = document.getElementById('db-body'); if (!el) return;
+
+  const bound = db.employees.filter(e => deviceBindings[e._key]?.deviceId);
+  const unbound = db.employees.filter(e => !deviceBindings[e._key]?.deviceId);
+
+  el.innerHTML = `
+    <div class="max-w-4xl">
+      <!-- Info banner -->
+      <div style="background:linear-gradient(135deg,#1e3a5f,#0f172a);border-radius:16px;padding:20px 24px;margin-bottom:24px;color:#f1f5f9;display:flex;align-items:flex-start;gap:14px;">
+        <i class="fas fa-shield-alt" style="font-size:28px;color:#f59e0b;flex-shrink:0;margin-top:2px;"></i>
+        <div>
+          <div style="font-size:16px;font-weight:700;margin-bottom:6px;">Device Binding — ป้องกันการฝากเพื่อนเช็คชื่อ</div>
+          <div style="font-size:13px;color:#94a3b8;line-height:1.6;">
+            เมื่อพนักงานกดเช็คชื่อครั้งแรกในโหมด <b style="color:#fbbf24;">กดปุ่ม + GPS</b> ระบบจะผูก <b>Device ID</b> ของอุปกรณ์นั้นกับบัญชีอัตโนมัติ
+            หากมีการล็อกอินจากอุปกรณ์อื่น ระบบจะบล็อกการเช็คชื่อทันที — Admin สามารถรีเซ็ตได้ที่หน้านี้
+          </div>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px;">
+        <div style="background:#fff;border-radius:14px;padding:16px;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,.06);">
+          <div style="font-size:28px;font-weight:700;color:#1e293b;">${db.employees.length}</div>
+          <div style="font-size:12px;color:#64748b;margin-top:3px;">พนักงานทั้งหมด</div>
+        </div>
+        <div style="background:#dcfce7;border-radius:14px;padding:16px;text-align:center;">
+          <div style="font-size:28px;font-weight:700;color:#16a34a;">${bound.length}</div>
+          <div style="font-size:12px;color:#15803d;margin-top:3px;"><i class="fas fa-shield-alt" style="margin-right:3px;"></i>ผูก Device แล้ว</div>
+        </div>
+        <div style="background:#fef9c3;border-radius:14px;padding:16px;text-align:center;">
+          <div style="font-size:28px;font-weight:700;color:#854d0e;">${unbound.length}</div>
+          <div style="font-size:12px;color:#92400e;margin-top:3px;"><i class="fas fa-exclamation-circle" style="margin-right:3px;"></i>ยังไม่ผูก</div>
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div style="background:#fff;border-radius:16px;box-shadow:0 1px 6px rgba(0,0,0,.07);overflow:hidden;">
+        <div style="padding:16px 20px;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;">
+          <div style="font-weight:700;font-size:15px;color:#1e293b;"><i class="fas fa-mobile-alt" style="color:#3b82f6;margin-right:8px;"></i>รายการผูกอุปกรณ์พนักงาน</div>
+          <input type="text" placeholder="ค้นหาชื่อ..." oninput="filterDbTable(this.value)"
+            style="border:1px solid #e2e8f0;border-radius:8px;padding:6px 12px;font-size:13px;width:180px;outline:none;font-family:Sarabun,sans-serif;">
+        </div>
+        <div style="overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead>
+              <tr style="background:#f8fafc;border-bottom:1px solid #e2e8f0;">
+                <th style="padding:12px 16px;text-align:left;font-weight:700;color:#64748b;">พนักงาน</th>
+                <th style="padding:12px 16px;text-align:left;font-weight:700;color:#64748b;">สายงาน</th>
+                <th style="padding:12px 16px;text-align:left;font-weight:700;color:#64748b;">สถานะ Device</th>
+                <th style="padding:12px 16px;text-align:left;font-weight:700;color:#64748b;">Device ID</th>
+                <th style="padding:12px 16px;text-align:left;font-weight:700;color:#64748b;">ผูกเมื่อ</th>
+                <th style="padding:12px 16px;text-align:center;font-weight:700;color:#64748b;">จัดการ</th>
+              </tr>
+            </thead>
+            <tbody id="db-tbody">
+              ${db.employees.map((emp,i) => {
+                const b = deviceBindings[emp._key];
+                const hasBind = b && b.deviceId;
+                return `
+                <tr style="${i%2===1?'background:#f8fafc;':''}" class="db-row" data-name="${emp.name.toLowerCase()}">
+                  <td style="padding:12px 16px;">
+                    <div style="font-weight:700;color:#1e293b;">${emp.name}</div>
+                    <div style="font-size:11px;color:#94a3b8;">${emp.username||''}</div>
+                  </td>
+                  <td style="padding:12px 16px;color:#475569;">${emp.dept||'-'}</td>
+                  <td style="padding:12px 16px;">
+                    ${hasBind
+                      ? '<span style="background:#dcfce7;color:#15803d;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:700;"><i class="fas fa-shield-alt" style="margin-right:3px;"></i>ผูกแล้ว</span>'
+                      : '<span style="background:#fef9c3;color:#854d0e;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:700;"><i class="fas fa-exclamation-circle" style="margin-right:3px;"></i>ยังไม่ผูก</span>'}
+                  </td>
+                  <td style="padding:12px 16px;font-family:monospace;font-size:11px;color:#64748b;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                    ${hasBind ? b.deviceId.slice(0,24)+'...' : '-'}
+                  </td>
+                  <td style="padding:12px 16px;font-size:12px;color:#64748b;">
+                    ${hasBind && b.boundAt ? new Date(b.boundAt).toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '-'}
+                  </td>
+                  <td style="padding:12px 16px;text-align:center;">
+                    ${hasBind
+                      ? `<button onclick="resetDeviceBinding('${emp._key}')"
+                          style="background:#fee2e2;color:#dc2626;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;">
+                          <i class="fas fa-unlink" style="margin-right:4px;"></i>รีเซ็ต
+                        </button>`
+                      : `<button onclick="forceBindDevice('${emp._key}')"
+                          style="background:#eff6ff;color:#3b82f6;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;">
+                          <i class="fas fa-link" style="margin-right:4px;"></i>ผูกเครื่องนี้
+                        </button>`}
+                  </td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+}
+
+window.filterDbTable = function(q) {
+  document.querySelectorAll('.db-row').forEach(r => {
+    r.style.display = r.dataset.name.includes(q.toLowerCase()) ? '' : 'none';
+  });
+};
+
+window.resetDeviceBinding = async function(empKey) {
+  const emp = db.employees.find(e => e._key === empKey);
+  if (!confirm(`รีเซ็ต Device Binding ของ "${emp?.name||empKey}"?\n\nพนักงานจะสามารถเช็คชื่อจากอุปกรณ์ใหม่ได้ครั้งแรกอีกครั้ง`)) return;
+  showSync();
+  await fbDelete('/deviceBindings/' + empKey);
+  delete deviceBindings[empKey];
+  hideSync();
+  pgDeviceBindings();
+};
+
+window.forceBindDevice = async function(empKey) {
+  const emp = db.employees.find(e => e._key === empKey);
+  const did = getDeviceId();
+  if (!confirm(`ผูกอุปกรณ์ปัจจุบัน (Admin) กับ "${emp?.name||empKey}"?\n\nDevice ID: ${did.slice(0,30)}...\n\n(ควรทำจากอุปกรณ์ของพนักงานจริงๆ)`)) return;
+  showSync();
+  const payload = { deviceId: did, boundAt: new Date().toISOString(), empName: emp?.name||empKey, boundBy: 'admin' };
+  await fbSet('/deviceBindings/' + empKey, payload);
+  deviceBindings[empKey] = payload;
+  hideSync();
+  pgDeviceBindings();
+};
+
+// =====================================================================
+//  _renderCheckinDone is defined above — GPS checkout hook injected here
+// =====================================================================
+// (No redefinition needed — doGpsButtonCheckout is called directly from button onclick)
+
 // =====================================================================
 window.onload=()=>{
   // โหลด remember me จาก localStorage
