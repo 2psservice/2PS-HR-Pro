@@ -792,18 +792,14 @@ function getMenus(role){
       {tab:'chg-pwd',icon:'fas fa-key',label:'เปลี่ยนรหัสผ่าน'},
     ];
   }
-  // Employee menu — checkin tab icon/label depends on mode
+  // Employee menu — 3 tabs only
   const effMode = getEffectiveCheckinMode({});
   const empCiIcon  = effMode==='gps_button'?'fas fa-map-marker-alt':effMode==='face'?'fas fa-smile':effMode==='both'?'fas fa-id-badge':'fas fa-qrcode';
   const empCiLabel = effMode==='gps_button'?'กดเข้างาน + GPS':effMode==='face'?'สแกนใบหน้า':effMode==='both'?'เช็คชื่อเข้างาน':'สแกน QR เข้างาน';
   return[
     {tab:'emp-home',icon:'fas fa-home',label:'หน้าหลัก'},
     {tab:'checkin-page',icon:empCiIcon,label:empCiLabel,c:'text-green-400'},
-    {tab:'emp-face-reg',icon:'fas fa-smile',label:'ลงทะเบียนใบหน้า',c:'text-purple-400'},
-    {div:1,label:'ประวัติ'},
     {tab:'emp-hist',icon:'fas fa-calendar-alt',label:'ประวัติการทำงาน'},
-    {div:1,label:'บัญชี'},
-    {tab:'chg-pwd',icon:'fas fa-key',label:'เปลี่ยนรหัสผ่าน'},
   ];
 }
 function goTab(tab,btn){
@@ -2583,7 +2579,9 @@ function _renderCheckinReady(wrap, empObj) {
   const clockInterval = setInterval(tick, 1000);
   // โหลดประวัติ
   _loadRecentHistory(empObj);
-  // ถ้าเป็น gps_button ให้ตรวจสอบ device binding
+  // Device Binding: ตรวจสอบทุกโหมด
+  _checkDeviceBindingUI(empObj);
+  // ถ้าเป็น gps_button ให้ตรวจสอบ device binding (enable/disable button)
   if(getEffectiveCheckinMode(empObj)==='gps_button') _checkAndEnableGpsBtn(empObj);
 }
 
@@ -2863,6 +2861,16 @@ async function _empAutoCheckIn(token){
   const empObj=db.employees.find(e=>e._key===CU.id);
   if(!empObj){if(statusEl){statusEl.className='mt-3 p-4 rounded-xl text-sm font-medium bg-red-50 text-red-700';statusEl.innerHTML='❌ ไม่พบข้อมูลพนักงาน';}return;}
 
+  // ตรวจ Device Binding
+  if(statusEl)statusEl.innerHTML='<i class="fas fa-shield-alt fa-spin mr-2"></i>กำลังตรวจสอบ Device Binding...';
+  const dbResult = await _enforceDeviceBinding(empObj._key, empObj.name);
+  if (!dbResult.ok) {
+    if(statusEl){statusEl.className='mt-3 p-4 rounded-xl text-sm font-medium bg-red-50 border-2 border-red-200 text-center';
+      statusEl.innerHTML='<div style="font-size:18px;margin-bottom:6px;">🚫</div><div style="font-weight:700;color:#991b1b;">'+dbResult.msg.replace(/\n/g,'<br>')+'</div>';}
+    if(btnScan)btnScan.disabled=false;
+    return;
+  }
+
   // ตรวจซ้ำ
   await loadAttendanceDate(todayStr);
   if(getAttendanceArray(todayStr).find(r=>r.empId===empObj._key)){
@@ -2938,6 +2946,17 @@ async function _empAutoCheckOut(token){
   const empObj=db.employees.find(e=>e._key===CU.id);
   if(!empObj){
     if(statusEl){statusEl.style.background='#fef2f2';statusEl.style.color='#991b1b';statusEl.innerHTML='❌ ไม่พบข้อมูลพนักงาน';}
+    return;
+  }
+
+  // ตรวจ Device Binding
+  if(statusEl){statusEl.style.display='block';statusEl.style.cssText='display:block;padding:14px;border-radius:12px;background:#eff6ff;color:#1d4ed8;font-size:13px;font-weight:600;text-align:center;';
+    statusEl.innerHTML='<i class="fas fa-shield-alt fa-spin" style="margin-right:6px;"></i>กำลังตรวจสอบ Device Binding...';}
+  const dbqOut = await _enforceDeviceBinding(empObj._key, empObj.name);
+  if (!dbqOut.ok) {
+    if(statusEl){statusEl.style.cssText='display:block;margin-top:10px;padding:14px;border-radius:12px;background:#fef2f2;border:2px solid #fecaca;text-align:center;font-size:13px;';
+      statusEl.innerHTML='<div style="font-size:16px;margin-bottom:6px;">🚫</div><div style="font-weight:700;color:#991b1b;">'+dbqOut.msg.replace(/\n/g,'<br>')+'</div>';}
+    if(btnScan)btnScan.disabled=false;
     return;
   }
 
@@ -3200,7 +3219,14 @@ window.doAddEmp=async function(){
 // =====================================================================
 function pgEmpHome(){
   const mc=document.getElementById('main-content');
-  mc.innerHTML=`<div id="emp-home-body"><div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div></div>`;
+  mc.innerHTML=`<div style="position:relative;">
+    <button onclick="openEmpSettings()" title="ตั้งค่า"
+      style="position:absolute;top:0;right:0;z-index:10;background:rgba(30,58,95,.12);border:none;width:36px;height:36px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .2s;"
+      onmouseover="this.style.background='rgba(30,58,95,.22)'" onmouseout="this.style.background='rgba(30,58,95,.12)'">
+      <i class="fas fa-cog" style="color:#475569;font-size:15px;"></i>
+    </button>
+    <div id="emp-home-body"><div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div></div>
+  </div>`;
   renderEmpHome();
 }
 async function renderEmpHome(){
@@ -3375,45 +3401,8 @@ window.showEmpDayDetail = function(dataStr) {
   openModal('รายละเอียดการทำงาน', body, `<button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-5 py-2.5 rounded-lg text-sm font-medium">ปิด</button>`);
 };
 
-function pgEmpHist(){
-  const mc=document.getElementById('main-content');
-  const months=getMonths();const mOpts=months.map(m=>`<option value="${m.v}">${m.l}</option>`).join('');
-  mc.innerHTML=`<div class="flex justify-between items-center mb-5">
-    <h3 class="text-base font-bold text-gray-700 border-l-4 border-blue-500 pl-3">ประวัติของฉัน</h3>
-    <select class="border rounded-lg px-3 py-2 text-sm" onchange="myHist(this.value)">${mOpts}</select>
-  </div><div id="my-hist"><div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div></div>`;
-  if(months[0])myHist(months[0].v);
-}
-window.myHist=async function(month){
-  const e=db.employees.find(x=>x._key===CU.id);if(!e)return;
-  await loadAttendanceMonth(month);
-  const recs=[];
-  Object.entries(db.attendance).forEach(([k,bucket])=>{
-    if(!k.startsWith(month))return;
-    const r=Object.values(bucket||{}).find(r=>r.empId===e._key);
-    if(r)recs.push({...r,dk:k});
-  });
-  recs.sort((a,b)=>a.dk.localeCompare(b.dk));
-  const tD=recs.length,tW=recs.reduce((s,r)=>s+r.wage,0),tO=recs.reduce((s,r)=>s+r.otPay,0),tA=recs.reduce((s,r)=>s+r.total,0),tOH=recs.reduce((s,r)=>s+r.otHours,0);
-  const el=document.getElementById('my-hist');if(!el)return;
-  el.innerHTML=card(`
-    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
-      ${StatCard('วันทำงาน',tD+' วัน','fa-calendar-check','green')}
-      ${StatCard('ค่าแรงปกติ','฿'+tW.toLocaleString(),'fa-coins','blue')}
-      ${StatCard('ค่า OT','฿'+tO.toLocaleString(),'fa-clock','yellow')}
-      ${StatCard('รวมทั้งหมด','฿'+tA.toLocaleString(),'fa-sack-dollar','purple')}
-    </div>
-    <table class="min-w-full text-sm">${THead('วันที่','เวลา','สถานที่','OT','ค่าแรง','รวม','GPS')}
-    <tbody>${recs.length===0?EmptyR(7):recs.map(r=>`<tr class="hover:bg-gray-50">
-      <td class="px-4 py-2">${fmtThai(r.dk)}</td>
-      <td class="px-4 py-2 font-mono">${r.checkInTime}</td>
-      <td class="px-4 py-2">${r.dept}</td>
-      <td class="px-4 py-2 text-center">${r.otHours>0?bdg('yellow',r.otHours+'ชม.'):'-'}</td>
-      <td class="px-4 py-2 text-right">฿${r.wage.toLocaleString()}</td>
-      <td class="px-4 py-2 text-right font-bold text-blue-700">฿${r.total.toLocaleString()}</td>
-      <td class="px-4 py-2">${r.gpsOk?bdg('green','✓'):bdg('red','✗')}</td>
-    </tr>`).join('')}</tbody></table>`);
-};
+// pgEmpHist replaced below
+// myHist replaced below
 
 // =====================================================================
 //  CHANGE PASSWORD
@@ -3746,20 +3735,20 @@ async function _startFaceCam() {
 // ============================================================
 //  FACE SECURITY CONSTANTS  (ปรับค่าได้ตามสภาพแวดล้อม)
 // ============================================================
-const FACE_MATCH_THRESHOLD   = 0.38;  // FaceMatcher max distance (เข้มงวด)
-const FACE_CONFIRM_FRAMES    = 4;     // ต้องยืนยัน 4 เฟรมติดกัน
-const FACE_CONFIRM_DIST_MAX  = 0.36;  // แต่ละเฟรมต้อง ≤ 0.36
-const FACE_SCORE_MIN         = 0.72;  // TinyFaceDetector confidence ขั้นต่ำ
-const FACE_REG_SAMPLES       = 5;     // จำนวนเฟรมสำหรับ registration (average)
-const FACE_REG_SCORE_MIN     = 0.75;  // Confidence ขั้นต่ำระหว่าง register
-const FACE_SIZE_MIN          = 0.08;  // ใบหน้าต้องใหญ่กว่า 8% ของเฟรม
-const FACE_SIZE_MAX          = 0.85;  // ใบหน้าต้องไม่ใหญ่เกินไป (ป้องกันจ่อชิดเกิน)
-const FACE_LIVENESS_FRAMES   = 6;     // เฟรมต่ำสุดก่อนเริ่ม check (anti-static-photo)
+const FACE_MATCH_THRESHOLD   = 0.50;  // FaceMatcher max distance (ผ่อนคลายขึ้น — 0.50 ยังปลอดภัย)
+const FACE_CONFIRM_FRAMES    = 3;     // ลดเป็น 3 เฟรม (เร็วขึ้น แต่ยังต้องยืนยันหลายครั้ง)
+const FACE_CONFIRM_DIST_MAX  = 0.46;  // ผ่อนคลายขึ้น (กล้องมือถือธรรมดาทำได้)
+const FACE_SCORE_MIN         = 0.55;  // ลดลง — กล้องธรรมดาและแสงน้อยผ่านได้
+const FACE_REG_SAMPLES       = 15;    // เพิ่มเป็น 15 เฟรม — เก็บ descriptor หลายมุม
+const FACE_REG_SCORE_MIN     = 0.55;  // ให้สอดคล้องกับ FACE_SCORE_MIN
+const FACE_SIZE_MIN          = 0.06;  // ผ่อนคลาย — ไม่ต้องเข้าใกล้มากนัก
+const FACE_SIZE_MAX          = 0.92;  // ผ่อนคลายเพดานบน
+const FACE_LIVENESS_FRAMES   = 4;     // ลดลง — เริ่มตรวจได้เร็วขึ้น
 
 // ---- Anti-spoof constants ----
-const SPOOF_MOTION_FRAMES    = 8;     // ต้องมี motion ใน N เฟรม (ป้องกันรูปภาพนิ่ง)
-const SPOOF_MOTION_THRESH    = 0.004; // threshold ความแตกต่างของ descriptor (motion)
-const SPOOF_BLUR_THRESH      = 180;   // Laplacian variance ต่ำกว่านี้ = ภาพเบลอ (วิดีโอคอล/จอโทรศัพท์)
+const SPOOF_MOTION_FRAMES    = 6;     // ลดลง — ตรวจ motion ใน 6 เฟรม
+const SPOOF_MOTION_THRESH    = 0.002; // ลดลง — motion เล็กน้อยก็ผ่าน
+const SPOOF_BLUR_THRESH      = 80;    // ลดลงมาก — กล้องมือถือธรรมดาไม่ติด false positive
 
 let _faceConfirmBuf  = [];
 let _faceFrameCount  = 0;            // นับเฟรมทั้งหมดตั้งแต่เปิดกล้อง (liveness)
@@ -3985,7 +3974,7 @@ async function _faceDetectLoop() {
       return;
     }
 
-    // Collect FACE_REG_SAMPLES high-quality frames
+    // Collect FACE_REG_SAMPLES high-quality frames with guided head prompts
     if (!_faceRegSampling) {
       _faceRegSampling = true;
       _faceRegBuf = [];
@@ -3994,25 +3983,40 @@ async function _faceDetectLoop() {
     _faceRegBuf.push(descriptor);
     const pct = Math.round((_faceRegBuf.length / FACE_REG_SAMPLES) * 100);
     setFaceRing(_faceRegBuf.length >= FACE_REG_SAMPLES ? 'green' : 'blue');
+
+    // Guidance prompts at different stages
+    const n = _faceRegBuf.length;
+    let guideTip = '';
+    if (n <= 3)        guideTip = '😐 มองตรงหน้ากล้อง';
+    else if (n <= 6)   guideTip = '↙ เอียงหน้าซ้ายเล็กน้อย';
+    else if (n <= 9)   guideTip = '↘ เอียงหน้าขวาเล็กน้อย';
+    else if (n <= 12)  guideTip = '↑ เงยหน้าขึ้นเล็กน้อย';
+    else               guideTip = '↓ ก้มหน้าลงเล็กน้อย · ใกล้เสร็จแล้ว';
+
     setFaceStatus('info',
-      `📸 กำลังเก็บตัวอย่างใบหน้า...<br>
-       <div style="background:#dbeafe;border-radius:6px;height:8px;margin:8px 0 4px;overflow:hidden;">
+      `📸 กำลังเก็บตัวอย่างใบหน้า (${n}/${FACE_REG_SAMPLES})<br>
+       <div style="background:#dbeafe;border-radius:6px;height:8px;margin:8px 0 6px;overflow:hidden;">
          <div style="background:#2563eb;height:100%;width:${pct}%;transition:width .2s;border-radius:6px;"></div>
        </div>
-       <span style="font-size:11px;color:#1d4ed8;">${_faceRegBuf.length}/${FACE_REG_SAMPLES} ตัวอย่าง · กรุณาอยู่นิ่งๆ</span>`);
+       <span style="font-size:12px;color:#1e40af;font-weight:600;">${guideTip}</span>`);
 
     if (_faceRegBuf.length < FACE_REG_SAMPLES) {
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 250));
       if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
       return;
     }
 
-    // Enough samples — compute mean descriptor
+    // Enough samples — store ALL descriptors (not just mean) for multi-angle coverage
     faceDetecting = false;
     _faceRegSampling = false;
-    const meanDesc = _computeMeanDescriptor(_faceRegBuf);
+    // Split into 3 groups and average each → 3 representative descriptors from different angles
+    const third = Math.floor(_faceRegBuf.length / 3);
+    const desc1 = _computeMeanDescriptor(_faceRegBuf.slice(0, third));
+    const desc2 = _computeMeanDescriptor(_faceRegBuf.slice(third, third*2));
+    const desc3 = _computeMeanDescriptor(_faceRegBuf.slice(third*2));
+    const multiDescriptors = [desc1, desc2, desc3];
     _faceRegBuf = [];
-    await _handleFaceRegister(meanDesc);
+    await _handleFaceRegisterMulti(multiDescriptors);
     return;
   }
 
@@ -4091,10 +4095,10 @@ function _computeMeanDescriptor(samples) {
   return mean;
 }
 
-// ---- Register: save descriptor to Firebase (stores multiple descriptors for better accuracy) ----
-async function _handleFaceRegister(descriptor) {
+// ---- Register Multi: save multiple angle descriptors (new method) ----
+async function _handleFaceRegisterMulti(descriptors) {
   faceDetecting = false;
-  setFaceStatus('info', '📸 จับใบหน้าสำเร็จ! กำลังบันทึก...');
+  setFaceStatus('info', '📸 เก็บตัวอย่างครบแล้ว! กำลังบันทึก...');
   const overlay = document.getElementById('face-scan-overlay');
   if (overlay) { overlay.style.display = 'flex'; setTimeout(() => { if(overlay) overlay.style.display = 'none'; }, 1200); }
 
@@ -4102,19 +4106,18 @@ async function _handleFaceRegister(descriptor) {
   const emp    = db.employees.find(e => e._key === empKey);
   if (!emp) { setFaceStatus('error', '❌ ไม่พบข้อมูลพนักงาน'); return; }
 
-  const isEmpSelf   = (faceModalMode === 'emp-register');
-  const newCount    = (emp.faceRegCount || 0) + 1;
-  const willLock    = isEmpSelf && newCount >= FACE_REG_MAX;
+  const isEmpSelf = (faceModalMode === 'emp-register');
+  const newCount  = (emp.faceRegCount || 0) + 1;
+  const willLock  = isEmpSelf && newCount >= FACE_REG_MAX;
 
-  // Store ALL descriptors as array (keep existing ones + new one)
-  const existing    = emp.faceDescriptors || (emp.faceDescriptor ? [emp.faceDescriptor] : []);
-  const allDescs    = [...existing.filter(d => Array.isArray(d) && d.length === 128), descriptor];
-  // Keep max FACE_REG_MAX samples (newest ones)
-  const keepDescs   = allDescs.slice(-FACE_REG_MAX);
+  // Merge with existing descriptors, keep up to 9 (3 registrations × 3 angles)
+  const existing  = emp.faceDescriptors || (emp.faceDescriptor ? [emp.faceDescriptor] : []);
+  const allDescs  = [...existing.filter(d => Array.isArray(d) && d.length === 128), ...descriptors];
+  const keepDescs = allDescs.slice(-9); // keep at most 9 descriptors
 
   const updatePayload = {
-    faceDescriptors: keepDescs,  // new multi-descriptor array
-    faceDescriptor:  descriptor, // keep legacy single for compat
+    faceDescriptors: keepDescs,
+    faceDescriptor:  descriptors[0], // keep legacy single for compat
     faceRegCount:    newCount,
     ...(isEmpSelf && willLock ? { faceRegLocked: true } : {})
   };
@@ -4125,15 +4128,15 @@ async function _handleFaceRegister(descriptor) {
     const idx = db.employees.findIndex(e => e._key === empKey);
     if (idx >= 0) {
       db.employees[idx].faceDescriptors = keepDescs;
-      db.employees[idx].faceDescriptor  = descriptor;
+      db.employees[idx].faceDescriptor  = descriptors[0];
       db.employees[idx].faceRegCount    = newCount;
       if (willLock) db.employees[idx].faceRegLocked = true;
     }
     faceMatcherDirty = true;
     hideSync();
     const msg = willLock
-      ? `✅ บันทึกสำเร็จ (ครั้งที่ ${newCount}/${FACE_REG_MAX})\n🔒 ถูกล็อค — ติดต่อ HR เพื่อรีเซ็ต`
-      : `✅ บันทึกใบหน้าสำเร็จ ครั้งที่ ${newCount}/${FACE_REG_MAX}`;
+      ? `✅ บันทึกสำเร็จ (ครั้งที่ ${newCount}/${FACE_REG_MAX}) · เก็บ ${keepDescs.length} มุม\n🔒 ถูกล็อค — ติดต่อ HR เพื่อรีเซ็ต`
+      : `✅ บันทึกใบหน้าสำเร็จ ครั้งที่ ${newCount}/${FACE_REG_MAX}\nเก็บ ${keepDescs.length} ตัวอย่าง (${descriptors.length} มุมใหม่)`;
     setFaceStatus('success', msg);
     setTimeout(() => {
       stopFaceCam();
@@ -4146,6 +4149,12 @@ async function _handleFaceRegister(descriptor) {
   }
 }
 
+// ---- Register (legacy single descriptor — admin path) ----
+async function _handleFaceRegister(descriptor) {
+  return _handleFaceRegisterMulti([descriptor]);
+}
+
+
 // ---- Check-in: match and record ----
 async function _handleFaceCheckin(descriptor) {
   faceDetecting = false;
@@ -4157,7 +4166,15 @@ async function _handleFaceCheckin(descriptor) {
     setTimeout(() => { faceDetecting = true; faceRafHandle = requestAnimationFrame(_faceDetectLoop); }, 3000);
     return;
   }
-  setFaceStatus('info', `✅ พบ: ${matched.emp.name}<br><span style="font-size:11px;opacity:.8;">กำลังตรวจสอบตำแหน่ง...</span>`);
+  setFaceStatus('info', `✅ พบ: ${matched.emp.name}<br><span style="font-size:11px;opacity:.8;">กำลังตรวจสอบ Device Binding...</span>`);
+
+  // ---- ตรวจ Device Binding ----
+  const fciDB = await _enforceDeviceBinding(matched.emp._key, matched.emp.name);
+  if (!fciDB.ok) {
+    setFaceRing('red');
+    setFaceStatus('error', '<div style="font-size:14px;margin-bottom:6px;">🚫 Device Binding ไม่ผ่าน</div><div style="font-size:11px;">' + fciDB.msg.replace(/\n/g,'<br>') + '</div>');
+    setTimeout(() => stopFaceCam(), 5000); return;
+  }
 
   // ---- ตรวจ GPS ก่อนเช็คซ้ำ ----
   setFaceStatus('info', '📍 กำลังตรวจสอบตำแหน่ง...');
@@ -4217,6 +4234,15 @@ async function _handleFaceCheckout(descriptor) {
     setFaceStatus('error', '❌ ไม่พบใบหน้าในระบบ');
     setTimeout(() => { faceDetecting = true; faceRafHandle = requestAnimationFrame(_faceDetectLoop); }, 3000);
     return;
+  }
+
+  // ---- ตรวจ Device Binding ----
+  setFaceStatus('info', '🛡️ กำลังตรวจสอบ Device Binding...');
+  const fcoDB = await _enforceDeviceBinding(matched.emp._key, matched.emp.name);
+  if (!fcoDB.ok) {
+    setFaceRing('red');
+    setFaceStatus('error', '<div style="font-size:14px;margin-bottom:6px;">🚫 Device Binding ไม่ผ่าน</div><div style="font-size:11px;">' + fcoDB.msg.replace(/\n/g,'<br>') + '</div>');
+    setTimeout(() => stopFaceCam(), 5000); return;
   }
 
   // ---- ตรวจ GPS ก่อน ----
@@ -4389,8 +4415,8 @@ function _matchFace(descriptor) {
     const otherDescs = (other.faceDescriptors || [other.faceDescriptor])
       .filter(d => Array.isArray(d) && d.length === 128);
     const otherMin = Math.min(...otherDescs.map(d => faceapi.euclideanDistance(new Float32Array(d), query)));
-    // If another person is almost as close (within 0.04), reject — ambiguous
-    if (otherMin < minDist + 0.04 && otherMin <= FACE_MATCH_THRESHOLD) return null;
+    // If another person is almost as close (within 0.10), reject — ambiguous
+    if (otherMin < minDist + 0.10 && otherMin <= FACE_MATCH_THRESHOLD) return null;
   }
 
   if (minDist > FACE_MATCH_THRESHOLD) return null;
@@ -5136,6 +5162,37 @@ window.exportSupExcel = function(supKey, month) {
 
   XLSX.writeFile(wb,`supervisor_${s.name||supKey}_${month}.xlsx`);
 };
+
+// =====================================================================
+//  DEVICE BINDING — UNIVERSAL CHECK (ใช้กับทุกโหมดการเช็คชื่อ)
+// =====================================================================
+// Returns: { ok: bool, msg: string }
+// - ถ้ายังไม่ผูก → ผูกอัตโนมัติครั้งแรก → ok:true
+// - ถ้าผูกแล้วตรง → ok:true
+// - ถ้าผูกแล้วไม่ตรง → ok:false
+async function _enforceDeviceBinding(empId, empName) {
+  const did = getDeviceId();
+  const b = deviceBindings[empId];
+  if (!b || !b.deviceId) {
+    // ครั้งแรก — ผูกอุปกรณ์นี้
+    const payload = { deviceId: did, boundAt: new Date().toISOString(), empName };
+    try {
+      await fbSet('/deviceBindings/' + empId, payload);
+      deviceBindings[empId] = payload;
+      return { ok: true, msg: '✅ ผูกอุปกรณ์นี้แล้ว' };
+    } catch(e) {
+      return { ok: false, msg: '❌ ผูกอุปกรณ์ไม่สำเร็จ: ' + e.message };
+    }
+  }
+  if (b.deviceId === did) {
+    return { ok: true, msg: '✅ อุปกรณ์ถูกต้อง' };
+  }
+  return {
+    ok: false,
+    msg: '🚫 อุปกรณ์นี้ไม่ใช่อุปกรณ์ที่ลงทะเบียนไว้\nกรุณาใช้อุปกรณ์เดิม หรือติดต่อ HR เพื่อรีเซ็ต'
+  };
+}
+
 // =====================================================================
 //  DEVICE BINDING — helper functions
 // =====================================================================
@@ -5222,6 +5279,52 @@ async function _checkAndEnableGpsBtnCo(empObj) {
 }
 
 // GPS Button Check-IN
+// Show device binding status banner on checkin page (for QR + Face modes)
+async function _checkDeviceBindingUI(empObj) {
+  if (CU.role !== 'employee') return;
+  const em = getEffectiveCheckinMode(empObj);
+  if (em === 'gps_button') return; // gps_button has its own banner
+  const did = getDeviceId();
+  const b = deviceBindings[empObj._key];
+  let html = '', bg = '#fff', border = '#e2e8f0', iconColor = '#64748b', textColor = '#475569';
+
+  if (!b || !b.deviceId) {
+    // ยังไม่ผูก — จะผูกตอนเช็คชื่อครั้งแรก
+    html = `<i class="fas fa-shield-alt" style="color:#f59e0b;margin-right:6px;"></i>
+      <span>อุปกรณ์นี้จะถูกผูกกับบัญชีเมื่อเช็คชื่อครั้งแรก</span>`;
+    bg = '#fffbeb'; border = '#fcd34d'; textColor = '#92400e';
+  } else if (b.deviceId === did) {
+    html = `<i class="fas fa-shield-alt" style="color:#16a34a;margin-right:6px;"></i>
+      <span>Device ได้รับการยืนยันแล้ว — ปลอดภัย</span>`;
+    bg = '#f0fdf4'; border = '#86efac'; textColor = '#15803d';
+  } else {
+    html = `<i class="fas fa-ban" style="color:#dc2626;margin-right:6px;"></i>
+      <span style="font-weight:700;">อุปกรณ์ไม่ตรง!</span> บัญชีนี้ผูกกับอุปกรณ์อื่นแล้ว ติดต่อ HR`;
+    bg = '#fef2f2'; border = '#fca5a5'; textColor = '#991b1b';
+    // Disable checkin buttons immediately
+    setTimeout(() => {
+      ['btn-scan','btn-face','btn-gps-checkin'].forEach(id => {
+        const btn = document.getElementById(id);
+        if (btn) { btn.disabled = true; btn.style.opacity = '.4'; btn.style.cursor = 'not-allowed'; }
+      });
+    }, 100);
+  }
+
+  // Insert banner before ci-status div
+  const ciPage = document.getElementById('ci-page');
+  if (!ciPage) return;
+  let banner = document.getElementById('device-bind-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'device-bind-banner';
+    const statusEl = ciPage.querySelector('#ci-status');
+    if (statusEl) ciPage.insertBefore(banner, statusEl);
+    else ciPage.appendChild(banner);
+  }
+  banner.style.cssText = `background:${bg};border:1px solid ${border};border-radius:12px;padding:10px 14px;font-size:12px;color:${textColor};display:flex;align-items:center;gap:6px;margin-bottom:12px;`;
+  banner.innerHTML = html;
+}
+
 window.doGpsButtonCheckin = async function() {
   const btn = document.getElementById('btn-gps-checkin');
   const statusEl = document.getElementById('ci-status');
@@ -5552,6 +5655,259 @@ window.forceBindDevice = async function(empKey) {
 //  _renderCheckinDone is defined above — GPS checkout hook injected here
 // =====================================================================
 // (No redefinition needed — doGpsButtonCheckout is called directly from button onclick)
+
+
+// =====================================================================
+//  EMP SETTINGS BOTTOM SHEET
+// =====================================================================
+window.openEmpSettings = function() {
+  // Create overlay + bottom sheet
+  let overlay = document.getElementById('emp-settings-overlay');
+  if (overlay) { overlay.style.display='flex'; setTimeout(()=>{overlay.querySelector('#emp-settings-sheet').style.transform='translateY(0)';},10); return; }
+  overlay = document.createElement('div');
+  overlay.id = 'emp-settings-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9000;display:flex;align-items:flex-end;justify-content:center;';
+  overlay.onclick = function(e){ if(e.target===overlay) closeEmpSettings(); };
+  overlay.innerHTML = `
+    <div id="emp-settings-sheet" style="background:#fff;border-radius:24px 24px 0 0;width:100%;max-width:480px;padding:0 0 env(safe-area-inset-bottom);transform:translateY(100%);transition:transform .32s cubic-bezier(.32,1.08,.52,1);">
+      <!-- Handle -->
+      <div style="display:flex;justify-content:center;padding:12px 0 8px;">
+        <div style="width:40px;height:4px;background:#e2e8f0;border-radius:2px;"></div>
+      </div>
+      <!-- Header -->
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:0 20px 16px;">
+        <div style="font-weight:700;font-size:16px;color:#1e293b;"><i class="fas fa-cog" style="margin-right:8px;color:#64748b;"></i>ตั้งค่าบัญชี</div>
+        <button onclick="closeEmpSettings()" style="background:#f1f5f9;border:none;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:16px;color:#64748b;display:flex;align-items:center;justify-content:center;">&times;</button>
+      </div>
+      <!-- Items -->
+      <div style="padding:0 16px 24px;display:flex;flex-direction:column;gap:10px;">
+        <button onclick="closeEmpSettings();setTimeout(()=>{goTab('emp-face-reg',null)},300)"
+          style="background:#f5f3ff;border:none;border-radius:16px;padding:16px 20px;text-align:left;cursor:pointer;display:flex;align-items:center;gap:14px;font-family:Sarabun,sans-serif;transition:background .15s;"
+          onmouseover="this.style.background='#ede9fe'" onmouseout="this.style.background='#f5f3ff'">
+          <div style="width:44px;height:44px;background:#8b5cf6;border-radius:12px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+            <i class="fas fa-smile" style="color:#fff;font-size:18px;"></i>
+          </div>
+          <div>
+            <div style="font-weight:700;font-size:14px;color:#1e293b;">ลงทะเบียนใบหน้า</div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px;">สแกนใบหน้าสำหรับเช็คชื่อ</div>
+          </div>
+          <i class="fas fa-chevron-right" style="margin-left:auto;color:#cbd5e1;"></i>
+        </button>
+        <button onclick="closeEmpSettings();setTimeout(()=>openChgPwdModal(),300)"
+          style="background:#fff7ed;border:none;border-radius:16px;padding:16px 20px;text-align:left;cursor:pointer;display:flex;align-items:center;gap:14px;font-family:Sarabun,sans-serif;transition:background .15s;"
+          onmouseover="this.style.background='#ffedd5'" onmouseout="this.style.background='#fff7ed'">
+          <div style="width:44px;height:44px;background:#f59e0b;border-radius:12px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+            <i class="fas fa-key" style="color:#fff;font-size:18px;"></i>
+          </div>
+          <div>
+            <div style="font-weight:700;font-size:14px;color:#1e293b;">เปลี่ยนรหัสผ่าน</div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px;">อัปเดตรหัสผ่านของคุณ</div>
+          </div>
+          <i class="fas fa-chevron-right" style="margin-left:auto;color:#cbd5e1;"></i>
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  setTimeout(()=>{ overlay.querySelector('#emp-settings-sheet').style.transform='translateY(0)'; }, 20);
+};
+
+window.closeEmpSettings = function() {
+  const overlay = document.getElementById('emp-settings-overlay');
+  if (!overlay) return;
+  const sheet = overlay.querySelector('#emp-settings-sheet');
+  if (sheet) sheet.style.transform = 'translateY(100%)';
+  setTimeout(()=>{ overlay.style.display='none'; }, 340);
+};
+
+window.openChgPwdModal = function() {
+  const body = `<div class="space-y-4">
+    <div><label class="text-sm font-medium text-gray-700 block mb-1">รหัสผ่านปัจจุบัน</label>
+      <input id="cpwd-old" type="password" placeholder="รหัสผ่านเดิม" class="w-full border rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none"></div>
+    <div><label class="text-sm font-medium text-gray-700 block mb-1">รหัสผ่านใหม่</label>
+      <input id="cpwd-new" type="password" placeholder="รหัสผ่านใหม่" class="w-full border rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none"></div>
+    <div><label class="text-sm font-medium text-gray-700 block mb-1">ยืนยันรหัสผ่านใหม่</label>
+      <input id="cpwd-cfm" type="password" placeholder="ยืนยันอีกครั้ง" class="w-full border rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none"></div>
+    <div id="cpwd-err" class="hidden text-sm text-red-600 bg-red-50 rounded-lg p-3 text-center"></div>
+  </div>`;
+  const footer = `<button onclick="doChgPwdModal()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-lg text-sm font-bold"><i class="fas fa-lock mr-1"></i>เปลี่ยนรหัสผ่าน</button>
+    <button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-4 py-2.5 rounded-lg text-sm font-medium">ยกเลิก</button>`;
+  openModal('🔑 เปลี่ยนรหัสผ่าน', body, footer);
+};
+
+window.doChgPwdModal = async function() {
+  const o = document.getElementById('cpwd-old')?.value;
+  const n = document.getElementById('cpwd-new')?.value;
+  const c = document.getElementById('cpwd-cfm')?.value;
+  const errEl = document.getElementById('cpwd-err');
+  const showErr = (msg) => { if(errEl){ errEl.textContent=msg; errEl.classList.remove('hidden'); } };
+  if (!o || !n || !c) { showErr('กรุณากรอกข้อมูลให้ครบ'); return; }
+  if (n !== c) { showErr('รหัสผ่านใหม่ไม่ตรงกัน'); return; }
+  if (n.length < 4) { showErr('รหัสผ่านต้องมีอย่างน้อย 4 ตัวอักษร'); return; }
+  const emp = db.employees.find(e => e._key === CU.id);
+  if (!emp || o !== emp.password) { showErr('รหัสผ่านเดิมไม่ถูกต้อง'); return; }
+  showSync();
+  await fbPatch('/employees/' + CU.id, { password: n });
+  emp.password = n;
+  hideSync();
+  closeModal();
+  alert('✅ เปลี่ยนรหัสผ่านสำเร็จ');
+};
+
+// =====================================================================
+//  pgEmpHist — Calendar + Stats + Recent list
+// =====================================================================
+// pgEmpHist replaced below
+function pgEmpHist() {
+  const mc = document.getElementById('main-content');
+  const months = getMonths();
+  const mOpts = months.map(m=>`<option value="${m.v}">${m.l}</option>`).join('');
+  mc.innerHTML = `<div style="max-width:480px;margin:0 auto;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <h3 style="font-size:15px;font-weight:700;color:#1e293b;border-left:4px solid #3b82f6;padding-left:10px;">ประวัติการทำงาน</h3>
+      <select class="border rounded-lg px-3 py-2 text-sm" style="font-family:Sarabun,sans-serif;" onchange="myHist(this.value)">${mOpts}</select>
+    </div>
+    <div id="my-hist"><div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div></div>
+  </div>`;
+  if (months[0]) myHist(months[0].v);
+}
+
+window.myHist = async function(month) {
+  const e = db.employees.find(x => x._key === CU.id); if (!e) return;
+  await loadAttendanceMonth(month);
+  const recs = [];
+  Object.entries(db.attendance).forEach(([k, bucket]) => {
+    if (!k.startsWith(month)) return;
+    const r = Object.values(bucket || {}).find(r => r.empId === e._key);
+    if (r) recs.push({...r, dk: k});
+  });
+  recs.sort((a, b) => a.dk.localeCompare(b.dk));
+
+  const tD = recs.length;
+  const tW = recs.reduce((s,r)=>s+r.wage,0);
+  const tO = recs.reduce((s,r)=>s+r.otPay,0);
+  const tA = recs.reduce((s,r)=>s+r.total,0);
+
+  const el = document.getElementById('my-hist'); if (!el) return;
+
+  // Build calendar
+  const [yr, mo] = month.split('-').map(Number);
+  const firstDay = new Date(yr, mo-1, 1).getDay(); // 0=Sun
+  const daysInMonth = new Date(yr, mo, 0).getDate();
+  const todayDate = new Date();
+  const isThisMonth = (todayDate.getFullYear()===yr && todayDate.getMonth()+1===mo);
+
+  const workedDays = new Set(recs.map(r => parseInt(r.dk.split('-')[2])));
+
+  const dayNames = ['อา','จ','อ','พ','พฤ','ศ','ส'];
+  let calCells = '';
+  // Day headers
+  dayNames.forEach((d, i) => {
+    calCells += `<div style="text-align:center;font-size:11px;font-weight:700;color:${i===0||i===6?'#ef4444':'#64748b'};padding:6px 0;">${d}</div>`;
+  });
+  // Empty prefix cells
+  for (let i = 0; i < firstDay; i++) {
+    calCells += `<div></div>`;
+  }
+  // Day cells
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dow = (firstDay + d - 1) % 7;
+    const isWeekend = (dow === 0 || dow === 6);
+    const isToday = isThisMonth && d === todayDate.getDate();
+    const worked = workedDays.has(d);
+    const dk = `${month}-${String(d).padStart(2,'0')}`;
+    const rec = recs.find(r => r.dk === dk);
+
+    let cellBg = 'transparent';
+    let dayColor = isWeekend ? '#ef4444' : '#1e293b';
+    let dotHtml = '';
+
+    if (isToday) {
+      cellBg = '#3b82f6';
+      dayColor = '#fff';
+    }
+    if (worked) {
+      dotHtml = `<div style="width:6px;height:6px;background:${isToday?'#bbf7d0':'#16a34a'};border-radius:50%;margin:0 auto;margin-top:2px;"></div>`;
+    }
+
+    const clickable = worked && rec;
+    const clickAttr = clickable
+      ? `onclick="showEmpDayDetail(${JSON.stringify({dk:rec.dk,checkInTime:rec.checkInTime,checkOutTime:rec.checkOutTime||'',dept:rec.dept,gpsOk:rec.gpsOk,wage:rec.wage,otPay:rec.otPay,total:rec.total,checkInMethod:rec.checkInMethod||'QR'}).replace(/\"/g,'&quot;')});event.stopPropagation();" style="cursor:pointer;"`
+      : 'style="cursor:default;"';
+
+    calCells += `<div ${clickAttr}>
+      <div style="width:32px;height:32px;border-radius:50%;background:${cellBg};display:flex;align-items:center;justify-content:center;margin:0 auto;font-size:13px;font-weight:${isToday?'700':'500'};color:${dayColor};">${d}</div>
+      ${dotHtml}
+    </div>`;
+  }
+
+  el.innerHTML = `
+    <!-- Stat cards -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;">
+      <div style="background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 1px 6px rgba(0,0,0,.06);border-left:3px solid #16a34a;">
+        <div style="font-size:22px;font-weight:700;color:#16a34a;">${tD}</div>
+        <div style="font-size:11px;color:#64748b;margin-top:2px;"><i class="fas fa-calendar-check" style="margin-right:4px;"></i>วันทำงาน</div>
+      </div>
+      <div style="background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 1px 6px rgba(0,0,0,.06);border-left:3px solid #3b82f6;">
+        <div style="font-size:18px;font-weight:700;color:#1d4ed8;">฿${tW.toLocaleString()}</div>
+        <div style="font-size:11px;color:#64748b;margin-top:2px;"><i class="fas fa-coins" style="margin-right:4px;"></i>ค่าแรงปกติ</div>
+      </div>
+      <div style="background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 1px 6px rgba(0,0,0,.06);border-left:3px solid #f59e0b;">
+        <div style="font-size:18px;font-weight:700;color:#d97706;">฿${tO.toLocaleString()}</div>
+        <div style="font-size:11px;color:#64748b;margin-top:2px;"><i class="fas fa-clock" style="margin-right:4px;"></i>ค่า OT</div>
+      </div>
+      <div style="background:linear-gradient(135deg,#1e3a5f,#1d4ed8);border-radius:14px;padding:14px 16px;box-shadow:0 1px 6px rgba(0,0,0,.1);">
+        <div style="font-size:18px;font-weight:700;color:#fff;">฿${tA.toLocaleString()}</div>
+        <div style="font-size:11px;color:#93c5fd;margin-top:2px;"><i class="fas fa-sack-dollar" style="margin-right:4px;"></i>รวมทั้งหมด</div>
+      </div>
+    </div>
+
+    <!-- Calendar -->
+    <div style="background:#fff;border-radius:16px;box-shadow:0 1px 6px rgba(0,0,0,.07);padding:16px;margin-bottom:16px;">
+      <div style="font-weight:700;font-size:13px;color:#1e293b;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+        <i class="fas fa-calendar-alt" style="color:#3b82f6;"></i>
+        ${new Date(yr, mo-1, 1).toLocaleDateString('th-TH',{month:'long',year:'numeric'})}
+        <span style="font-size:11px;background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:10px;font-weight:600;margin-left:auto;">${tD} วัน</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;">
+        ${calCells}
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:12px;font-size:11px;color:#64748b;">
+        <div style="display:flex;align-items:center;gap:4px;"><div style="width:8px;height:8px;background:#16a34a;border-radius:50%;"></div>มาทำงาน</div>
+        <div style="display:flex;align-items:center;gap:4px;"><div style="width:22px;height:22px;background:#3b82f6;border-radius:50%;"></div>วันนี้</div>
+        <div style="display:flex;align-items:center;gap:4px;color:#ef4444;">อา/ส = วันหยุด</div>
+      </div>
+    </div>
+
+    <!-- Recent records list -->
+    ${recs.length ? `
+    <div style="background:#fff;border-radius:16px;box-shadow:0 1px 6px rgba(0,0,0,.07);overflow:hidden;">
+      <div style="padding:14px 18px;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-weight:700;font-size:13px;color:#1e293b;"><i class="fas fa-list-alt" style="margin-right:6px;color:#3b82f6;"></i>รายการทั้งหมด</div>
+        <span style="font-size:11px;color:#64748b;">${tD} รายการ</span>
+      </div>
+      ${[...recs].reverse().map((r,i) => `
+        <div onclick="showEmpDayDetail(${JSON.stringify({dk:r.dk,checkInTime:r.checkInTime,checkOutTime:r.checkOutTime||'',dept:r.dept,gpsOk:r.gpsOk,wage:r.wage,otPay:r.otPay,total:r.total,checkInMethod:r.checkInMethod||'QR'}).replace(/\"/g,'&quot;')})"
+          style="padding:12px 18px;border-bottom:${i<recs.length-1?'1px solid #f8fafc':'none'};cursor:pointer;display:flex;justify-content:space-between;align-items:center;transition:background .15s;"
+          onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:#1e293b;">${fmtThai(r.dk)}${r.dk===todayStr?'<span style="background:#dbeafe;color:#1e40af;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:6px;">วันนี้</span>':''}</div>
+            <div style="font-size:11px;color:#64748b;margin-top:2px;display:flex;align-items:center;gap:6px;">
+              <span><i class="fas fa-sign-in-alt" style="color:#16a34a;margin-right:2px;font-size:9px;"></i>${r.checkInTime}</span>
+              ${r.checkOutTime?`<span><i class="fas fa-sign-out-alt" style="color:#dc2626;margin-right:2px;font-size:9px;"></i>${r.checkOutTime}</span>`:'<span style="color:#f59e0b;font-size:10px;">ยังไม่ได้ออก</span>'}
+            </div>
+          </div>
+          <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+            <div style="font-weight:700;color:#16a34a;font-size:14px;">฿${r.total.toLocaleString()}</div>
+            ${r.gpsOk?'<span style="font-size:10px;background:#dcfce7;color:#166534;padding:1px 6px;border-radius:6px;">✓ GPS</span>':'<span style="font-size:10px;background:#fee2e2;color:#991b1b;padding:1px 6px;border-radius:6px;">✗ GPS</span>'}
+          </div>
+        </div>`).join('')}
+    </div>` : `
+    <div style="background:#fff;border-radius:16px;padding:32px;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,.07);">
+      <i class="fas fa-calendar-times" style="font-size:36px;color:#cbd5e1;display:block;margin-bottom:12px;"></i>
+      <div style="color:#94a3b8;font-size:14px;">ไม่มีข้อมูลเดือนนี้</div>
+    </div>`}
+  `;
+};
 
 // =====================================================================
 window.onload=()=>{
