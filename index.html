@@ -56,11 +56,33 @@ tr:nth-child(even){background:#f8fafc;}
 #page-loader.hidden{display:none;}
 
 /* ===== FACE RECOGNITION ===== */
-#face-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:10000;align-items:center;justify-content:center;}
+#face-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:10000;align-items:center;justify-content:center;}
 #face-modal.active{display:flex;}
-.face-ring{position:absolute;border:3px solid #22d3ee;border-radius:50%;pointer-events:none;transition:border-color .3s;}
-@keyframes faceRingPulse{0%,100%{opacity:.6;transform:scale(1)}50%{opacity:1;transform:scale(1.02)}}
-.face-ring-pulse{animation:faceRingPulse 1.5s ease-in-out infinite;}
+.face-ring{position:absolute;border:3px solid #22d3ee;border-radius:50%;pointer-events:none;transition:border-color .25s,box-shadow .25s;}
+@keyframes faceRingPulse{0%,100%{opacity:.7;transform:scale(1)}50%{opacity:1;transform:scale(1.015)}}
+.face-ring-pulse{animation:faceRingPulse 1.2s ease-in-out infinite;}
+/* Green radar scan line — sweeps top→bottom→top */
+@keyframes radarScan{
+  0%  {top:0%;opacity:1}
+  45% {top:96%;opacity:.9}
+  50% {top:96%;opacity:0}
+  55% {top:0%;opacity:0}
+  60% {top:0%;opacity:1}
+  100%{top:0%;opacity:1}
+}
+@keyframes radarScanRev{
+  0%  {top:96%;opacity:1}
+  45% {top:0%;opacity:.9}
+  50% {top:0%;opacity:0}
+  55% {top:96%;opacity:0}
+  60% {top:96%;opacity:1}
+  100%{top:96%;opacity:1}
+}
+#face-radar-line{position:absolute;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent 0%,#22c55e 20%,#4ade80 50%,#22c55e 80%,transparent 100%);filter:drop-shadow(0 0 6px #22c55e);pointer-events:none;animation:radarScan 2s linear infinite;}
+#face-radar-glow{position:absolute;left:0;right:0;height:40px;background:linear-gradient(180deg,rgba(34,197,94,.18) 0%,transparent 100%);pointer-events:none;animation:radarScan 2s linear infinite;margin-top:-2px;}
+.face-ring.green{box-shadow:0 0 0 3px rgba(34,197,94,.3),0 0 24px rgba(34,197,94,.4);}
+.face-ring.red{box-shadow:0 0 0 3px rgba(239,68,68,.3),0 0 24px rgba(239,68,68,.4);}
+.face-ring.yellow{box-shadow:0 0 0 3px rgba(245,158,11,.3),0 0 16px rgba(245,158,11,.3);}
 .face-status-box{margin-top:14px;padding:12px 16px;border-radius:14px;text-align:center;font-size:13px;font-weight:600;transition:all .3s;}
 </style>
 </head>
@@ -188,10 +210,13 @@ tr:nth-child(even){background:#f8fafc;}
     <div style="position:relative;border-radius:18px;overflow:hidden;background:#000;aspect-ratio:4/3;">
       <video id="face-vid" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;transform:scaleX(-1);"></video>
 
-      <!-- Oval guide ring -->
+      <!-- Oval guide ring — wider -->
       <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;">
-        <div class="face-ring face-ring-pulse" id="face-ring" style="width:160px;height:200px;border-color:#22d3ee;"></div>
+        <div class="face-ring face-ring-pulse" id="face-ring" style="width:220px;height:270px;border-color:#22d3ee;border-width:3px;"></div>
       </div>
+      <!-- Radar scan line (green, sweeps up/down) -->
+      <div id="face-radar-line"></div>
+      <div id="face-radar-glow"></div>
 
       <!-- Corner guides (bracket style) -->
       <div id="face-corners" style="position:absolute;inset:0;pointer-events:none;">
@@ -3647,9 +3672,21 @@ function setFaceStatus(type, msg) {
 function setFaceRing(color) {
   const r = document.getElementById('face-ring');
   if (!r) return;
-  const c = { green:'#22c55e', red:'#ef4444', yellow:'#eab308', blue:'#22d3ee', gray:'#475569' };
-  r.style.borderColor = c[color] || c.blue;
+  const colorMap = { green:'#22c55e', red:'#ef4444', yellow:'#eab308', blue:'#22d3ee', gray:'#475569' };
+  const hex = colorMap[color] || colorMap.blue;
+  r.style.borderColor = hex;
   r.classList.toggle('face-ring-pulse', color !== 'green' && color !== 'red');
+  // Glow class
+  r.classList.remove('green','red','yellow');
+  if (color === 'green' || color === 'red' || color === 'yellow') r.classList.add(color);
+  // Sync radar line color
+  const radar = document.getElementById('face-radar-line');
+  const glow  = document.getElementById('face-radar-glow');
+  if (radar) {
+    radar.style.background = `linear-gradient(90deg,transparent 0%,${hex} 20%,${hex}dd 50%,${hex} 80%,transparent 100%)`;
+    radar.style.filter = `drop-shadow(0 0 8px ${hex})`;
+  }
+  if (glow) glow.style.background = `linear-gradient(180deg,${hex}28 0%,transparent 100%)`;
 }
 
 // Open face modal — REGISTER mode (admin/supervisor)
@@ -3693,6 +3730,7 @@ async function _startFaceCam() {
   // Reset all security buffers
   _faceConfirmBuf = []; _faceRegBuf = []; _faceRegSampling = false; _faceFrameCount = 0;
   _faceMotionBuf = []; _spoofWarnings = 0; _spoofLocked = false;
+  _regStep = 0; _regStepDescs = [];
   _hideFaceHint();
   const sizeBar = document.getElementById('face-size-bar-wrap');
   if (sizeBar) sizeBar.style.display = 'none';
@@ -3754,6 +3792,10 @@ let _faceConfirmBuf  = [];
 let _faceFrameCount  = 0;            // นับเฟรมทั้งหมดตั้งแต่เปิดกล้อง (liveness)
 let _faceRegBuf      = [];           // buffer เฟรม registration
 let _faceRegSampling = false;
+// 3-step registration
+let _regStep         = 0;            // 0=front, 1=left, 2=right
+let _regStepDescs    = [];           // [frontMean, leftMean, rightMean]
+const REG_STEP_FRAMES = 5;           // frames per step
 
 // ---- Anti-spoof tracking ----
 let _faceMotionBuf   = [];           // เก็บ descriptor ล่าสุดสำหรับ motion check
@@ -3974,49 +4016,64 @@ async function _faceDetectLoop() {
       return;
     }
 
-    // Collect FACE_REG_SAMPLES high-quality frames with guided head prompts
+    // ============================================================
+    //  3-STEP REGISTRATION: Front → Left → Right (REG_STEP_FRAMES each)
+    // ============================================================
+    const stepLabels = [
+      { icon:'😐', th:'หน้าตรง', en:'ขั้น 1/3 — มองตรงหน้ากล้อง', color:'#3b82f6' },
+      { icon:'◀', th:'หันซ้าย', en:'ขั้น 2/3 — หันหน้าไปทางซ้ายเล็กน้อย', color:'#8b5cf6' },
+      { icon:'▶', th:'หันขวา',  en:'ขั้น 3/3 — หันหน้าไปทางขวาเล็กน้อย', color:'#10b981' },
+    ];
+    const curStep = stepLabels[_regStep] || stepLabels[0];
+
     if (!_faceRegSampling) {
       _faceRegSampling = true;
       _faceRegBuf = [];
     }
 
     _faceRegBuf.push(descriptor);
-    const pct = Math.round((_faceRegBuf.length / FACE_REG_SAMPLES) * 100);
-    setFaceRing(_faceRegBuf.length >= FACE_REG_SAMPLES ? 'green' : 'blue');
-
-    // Guidance prompts at different stages
-    const n = _faceRegBuf.length;
-    let guideTip = '';
-    if (n <= 3)        guideTip = '😐 มองตรงหน้ากล้อง';
-    else if (n <= 6)   guideTip = '↙ เอียงหน้าซ้ายเล็กน้อย';
-    else if (n <= 9)   guideTip = '↘ เอียงหน้าขวาเล็กน้อย';
-    else if (n <= 12)  guideTip = '↑ เงยหน้าขึ้นเล็กน้อย';
-    else               guideTip = '↓ ก้มหน้าลงเล็กน้อย · ใกล้เสร็จแล้ว';
-
+    const pct = Math.round((_faceRegBuf.length / REG_STEP_FRAMES) * 100);
+    setFaceRing(_faceRegBuf.length >= REG_STEP_FRAMES ? 'green' : 'blue');
     setFaceStatus('info',
-      `📸 กำลังเก็บตัวอย่างใบหน้า (${n}/${FACE_REG_SAMPLES})<br>
-       <div style="background:#dbeafe;border-radius:6px;height:8px;margin:8px 0 6px;overflow:hidden;">
-         <div style="background:#2563eb;height:100%;width:${pct}%;transition:width .2s;border-radius:6px;"></div>
+      `<span style="font-size:22px;">${curStep.icon}</span>
+       <div style="font-size:13px;font-weight:700;color:${curStep.color};margin:4px 0 2px;">${curStep.en}</div>
+       <div style="background:#1e293b;border-radius:8px;height:10px;margin:8px 0 4px;overflow:hidden;">
+         <div style="background:${curStep.color};height:100%;width:${pct}%;transition:width .2s;border-radius:8px;"></div>
        </div>
-       <span style="font-size:12px;color:#1e40af;font-weight:600;">${guideTip}</span>`);
+       <span style="font-size:11px;color:#94a3b8;">${_faceRegBuf.length}/${REG_STEP_FRAMES} เฟรม</span>`);
 
-    if (_faceRegBuf.length < FACE_REG_SAMPLES) {
-      await new Promise(r => setTimeout(r, 250));
+    if (_faceRegBuf.length < REG_STEP_FRAMES) {
+      await new Promise(r => setTimeout(r, 300));
       if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
       return;
     }
 
-    // Enough samples — store ALL descriptors (not just mean) for multi-angle coverage
-    faceDetecting = false;
-    _faceRegSampling = false;
-    // Split into 3 groups and average each → 3 representative descriptors from different angles
-    const third = Math.floor(_faceRegBuf.length / 3);
-    const desc1 = _computeMeanDescriptor(_faceRegBuf.slice(0, third));
-    const desc2 = _computeMeanDescriptor(_faceRegBuf.slice(third, third*2));
-    const desc3 = _computeMeanDescriptor(_faceRegBuf.slice(third*2));
-    const multiDescriptors = [desc1, desc2, desc3];
+    // Step done — compute mean descriptor for this step
+    const stepMean = _computeMeanDescriptor(_faceRegBuf);
+    _regStepDescs.push(stepMean);
     _faceRegBuf = [];
-    await _handleFaceRegisterMulti(multiDescriptors);
+    _faceRegSampling = false;
+    _faceFrameCount = 0; // reset liveness for next step
+
+    if (_regStep < 2) {
+      // Next step
+      _regStep++;
+      setFaceRing('green');
+      const nextStep = stepLabels[_regStep];
+      setFaceStatus('success',
+        `✅ ${stepLabels[_regStep-1].th} — บันทึกแล้ว!<br>
+         <span style="font-size:13px;color:${nextStep.color};font-weight:700;">→ ต่อไป: ${nextStep.th} ${nextStep.icon}</span>`);
+      await new Promise(r => setTimeout(r, 1500));
+      if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
+      return;
+    }
+
+    // All 3 steps done — compute final combined descriptor = average of 3 step means
+    faceDetecting = false;
+    const finalDesc = _computeMeanDescriptor(_regStepDescs); // 1 combined descriptor
+    _regStepDescs = [];
+    _regStep = 0;
+    await _handleFaceRegisterMulti([finalDesc]);
     return;
   }
 
@@ -4585,11 +4642,23 @@ window.saveCheckinMode = async function() {
 
 window.delFaceData = async function(empKey) {
   const emp = db.employees.find(e => e._key === empKey);
-  if (!confirm(`ลบข้อมูลใบหน้าของ ${emp?.name||empKey}?`)) return;
+  if (!confirm(`ลบข้อมูลใบหน้าของ ${emp?.name||empKey}?\n\nระบบจะลบข้อมูลใบหน้าทั้งหมดออกจากฐานข้อมูล`)) return;
   showSync();
-  await fbPatch(`/employees/${empKey}`, { faceDescriptor: null });
+  // Clear ALL face data fields completely
+  await fbPatch(`/employees/${empKey}`, {
+    faceDescriptor: null,
+    faceDescriptors: [],
+    faceRegCount: 0,
+    faceRegLocked: false
+  });
   const idx = db.employees.findIndex(e => e._key === empKey);
-  if (idx >= 0) delete db.employees[idx].faceDescriptor;
+  if (idx >= 0) {
+    db.employees[idx].faceDescriptor  = null;
+    db.employees[idx].faceDescriptors = [];
+    db.employees[idx].faceRegCount    = 0;
+    db.employees[idx].faceRegLocked   = false;
+  }
+  faceMatcherDirty = true;
   hideSync();
   pgCheckinSettings();
 };
