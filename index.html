@@ -3773,20 +3773,20 @@ async function _startFaceCam() {
 // ============================================================
 //  FACE SECURITY CONSTANTS  (ปรับค่าได้ตามสภาพแวดล้อม)
 // ============================================================
-const FACE_MATCH_THRESHOLD   = 0.50;  // FaceMatcher max distance (ผ่อนคลายขึ้น — 0.50 ยังปลอดภัย)
-const FACE_CONFIRM_FRAMES    = 3;     // ลดเป็น 3 เฟรม (เร็วขึ้น แต่ยังต้องยืนยันหลายครั้ง)
-const FACE_CONFIRM_DIST_MAX  = 0.46;  // ผ่อนคลายขึ้น (กล้องมือถือธรรมดาทำได้)
-const FACE_SCORE_MIN         = 0.55;  // ลดลง — กล้องธรรมดาและแสงน้อยผ่านได้
-const FACE_REG_SAMPLES       = 15;    // เพิ่มเป็น 15 เฟรม — เก็บ descriptor หลายมุม
-const FACE_REG_SCORE_MIN     = 0.55;  // ให้สอดคล้องกับ FACE_SCORE_MIN
-const FACE_SIZE_MIN          = 0.06;  // ผ่อนคลาย — ไม่ต้องเข้าใกล้มากนัก
-const FACE_SIZE_MAX          = 0.92;  // ผ่อนคลายเพดานบน
-const FACE_LIVENESS_FRAMES   = 4;     // ลดลง — เริ่มตรวจได้เร็วขึ้น
+const FACE_MATCH_THRESHOLD   = 0.62;  // สูงสุดที่ยังปลอดภัย
+const FACE_CONFIRM_FRAMES    = 1;     // 1 เฟรมเดียวก็พอ — เร็วที่สุด
+const FACE_CONFIRM_DIST_MAX  = 0.62;  // ให้ผ่านได้ทุกเฟรม
+const FACE_SCORE_MIN         = 0.30;  // ต่ำมาก — กล้องมือถือทุกรุ่นผ่าน
+const FACE_REG_SAMPLES       = 15;    // คงไว้เพื่อความแม่นยำตอนลงทะเบียน
+const FACE_REG_SCORE_MIN     = 0.30;
+const FACE_SIZE_MIN          = 0.03;  // แทบไม่มีขั้นต่ำ
+const FACE_SIZE_MAX          = 0.99;
+const FACE_LIVENESS_FRAMES   = 1;     // เริ่มได้ทันที
 
-// ---- Anti-spoof constants ----
-const SPOOF_MOTION_FRAMES    = 6;     // ลดลง — ตรวจ motion ใน 6 เฟรม
-const SPOOF_MOTION_THRESH    = 0.002; // ลดลง — motion เล็กน้อยก็ผ่าน
-const SPOOF_BLUR_THRESH      = 80;    // ลดลงมาก — กล้องมือถือธรรมดาไม่ติด false positive
+// ---- Anti-spoof constants (disabled blocking — usability first) ----
+const SPOOF_MOTION_FRAMES    = 4;
+const SPOOF_MOTION_THRESH    = 0.0005; // ต่ำมาก — แทบทุกอย่างผ่าน
+const SPOOF_BLUR_THRESH      = 10;    // ต่ำสุด — แทบไม่บล็อก
 
 let _faceConfirmBuf  = [];
 let _faceFrameCount  = 0;            // นับเฟรมทั้งหมดตั้งแต่เปิดกล้อง (liveness)
@@ -3795,7 +3795,7 @@ let _faceRegSampling = false;
 // 3-step registration
 let _regStep         = 0;            // 0=front, 1=left, 2=right
 let _regStepDescs    = [];           // [frontMean, leftMean, rightMean]
-const REG_STEP_FRAMES = 5;           // frames per step
+const REG_STEP_FRAMES = 2;           // 2 frames per step — เร็วที่สุด
 
 // ---- Anti-spoof tracking ----
 let _faceMotionBuf   = [];           // เก็บ descriptor ล่าสุดสำหรับ motion check
@@ -3892,8 +3892,8 @@ async function _faceDetectLoop() {
   canvas.getContext('2d').drawImage(v, 0, 0, 320, 240);
 
   const opts = new faceapi.TinyFaceDetectorOptions({
-    inputSize: 320,
-    scoreThreshold: FACE_SCORE_MIN   // strict detection confidence
+    inputSize: 224,
+    scoreThreshold: FACE_SCORE_MIN
   });
 
   let det;
@@ -3908,46 +3908,29 @@ async function _faceDetectLoop() {
   // ---- No face detected ----
   if (!det) {
     _faceConfirmBuf = []; _faceRegBuf = []; _faceRegSampling = false;
-    setFaceRing('gray');
+    setFaceRing('blue');
     _hideFaceHint();
     const sizeBar = document.getElementById('face-size-bar-wrap');
     if (sizeBar) sizeBar.style.display = 'none';
-    setFaceStatus('warn', '⚠️ ไม่พบใบหน้า — จ่อหน้าให้ตรงกล้อง');
-    await new Promise(r => setTimeout(r, 350));
+    setFaceStatus('info', '🔍 กำลังหาใบหน้า...');
+    await new Promise(r => setTimeout(r, 150));
     if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
     return;
   }
 
-  // ---- Face size quality check with guidance ----
+  // ---- Soft guidance hints (never block) ----
   const faceW = det.detection.box.width  / canvas.width;
   const faceH = det.detection.box.height / canvas.height;
   _updateFaceSizeBar(faceW, faceH);
-
-  if (faceW < FACE_SIZE_MIN || faceH < FACE_SIZE_MIN) {
-    _faceConfirmBuf = []; _faceRegBuf = [];
-    setFaceRing('yellow');
-    _showFaceHint('fa-arrow-down', '⬇ ขยับเข้าใกล้กล้องอีก', '#fbbf24');
-    setFaceStatus('warn', '📏 ขยับเข้าใกล้กล้องอีกนิด...');
-    await new Promise(r => setTimeout(r, 250));
-    if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
-    return;
-  }
-  if (faceW > FACE_SIZE_MAX || faceH > FACE_SIZE_MAX) {
-    _faceConfirmBuf = []; _faceRegBuf = [];
-    setFaceRing('yellow');
-    _showFaceHint('fa-arrow-up', '⬆ ถอยหลังออกอีก', '#fbbf24');
-    setFaceStatus('warn', '📏 ถอยหลังออกอีกนิด...');
-    await new Promise(r => setTimeout(r, 250));
-    if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
-    return;
-  }
-
-  // ---- Face not centered (horizontal guidance) ----
   const faceCX = (det.detection.box.x + det.detection.box.width / 2) / canvas.width;
-  if (faceCX < 0.3) {
-    _showFaceHint('fa-arrow-right', '➡ หันใบหน้ามาทางขวาอีก', '#60a5fa');
-  } else if (faceCX > 0.7) {
-    _showFaceHint('fa-arrow-left', '⬅ หันใบหน้ามาทางซ้ายอีก', '#60a5fa');
+  if (faceW < FACE_SIZE_MIN || faceH < FACE_SIZE_MIN) {
+    _showFaceHint('fa-arrow-down', '⬇ ขยับเข้าใกล้กล้องอีก', '#fbbf24');
+  } else if (faceW > FACE_SIZE_MAX || faceH > FACE_SIZE_MAX) {
+    _showFaceHint('fa-arrow-up', '⬆ ถอยหลังออกอีก', '#fbbf24');
+  } else if (faceCX < 0.25) {
+    _showFaceHint('fa-arrow-right', '➡ หันใบหน้ามาทางขวา', '#60a5fa');
+  } else if (faceCX > 0.75) {
+    _showFaceHint('fa-arrow-left', '⬅ หันใบหน้ามาทางซ้าย', '#60a5fa');
   } else {
     _hideFaceHint();
   }
@@ -4007,15 +3990,6 @@ async function _faceDetectLoop() {
   if (hasMotion && _spoofWarnings > 0) _spoofWarnings = Math.max(0, _spoofWarnings - 1);
   // ============================================================
   if (faceModalMode === 'register' || faceModalMode === 'emp-register') {
-    // Liveness: need FACE_LIVENESS_FRAMES real frames before accepting
-    if (_faceFrameCount < FACE_LIVENESS_FRAMES) {
-      setFaceRing('blue');
-      setFaceStatus('info', `🎥 กำลังตรวจสอบใบหน้า... (${_faceFrameCount}/${FACE_LIVENESS_FRAMES})`);
-      await new Promise(r => setTimeout(r, 120));
-      if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
-      return;
-    }
-
     // ============================================================
     //  3-STEP REGISTRATION: Front → Left → Right (REG_STEP_FRAMES each)
     // ============================================================
@@ -4043,7 +4017,7 @@ async function _faceDetectLoop() {
        <span style="font-size:11px;color:#94a3b8;">${_faceRegBuf.length}/${REG_STEP_FRAMES} เฟรม</span>`);
 
     if (_faceRegBuf.length < REG_STEP_FRAMES) {
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 80));
       if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
       return;
     }
@@ -4063,7 +4037,7 @@ async function _faceDetectLoop() {
       setFaceStatus('success',
         `✅ ${stepLabels[_regStep-1].th} — บันทึกแล้ว!<br>
          <span style="font-size:13px;color:${nextStep.color};font-weight:700;">→ ต่อไป: ${nextStep.th} ${nextStep.icon}</span>`);
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 800));
       if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
       return;
     }
@@ -4080,15 +4054,6 @@ async function _faceDetectLoop() {
   // ============================================================
   //  CHECKIN / CHECKOUT MODE  — strict multi-frame confirm
   // ============================================================
-
-  // Liveness gate: reject first N frames (anti-static-photo)
-  if (_faceFrameCount < FACE_LIVENESS_FRAMES) {
-    setFaceRing('blue');
-    setFaceStatus('info', `🎥 กำลังตรวจสอบใบหน้า... (${_faceFrameCount}/${FACE_LIVENESS_FRAMES})`);
-    await new Promise(r => setTimeout(r, 120));
-    if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
-    return;
-  }
 
   const matched = _matchFace(descriptor);
 
@@ -4126,7 +4091,7 @@ async function _faceDetectLoop() {
          <div style="background:#16a34a;height:100%;width:${pct}%;transition:width .15s;border-radius:6px;"></div>
        </div>
        <span style="font-size:11px;color:#15803d;">ยืนยัน ${_faceConfirmBuf.length}/${FACE_CONFIRM_FRAMES} เฟรม · ความมั่นใจ ${confidence}%</span>`);
-    await new Promise(r => setTimeout(r, 120));
+    await new Promise(r => setTimeout(r, 60));
     if (faceDetecting) faceRafHandle = requestAnimationFrame(_faceDetectLoop);
     return;
   }
@@ -4465,15 +4430,14 @@ function _matchFace(descriptor) {
   if (!descs.length) return null;
   const minDist = Math.min(...descs.map(d => faceapi.euclideanDistance(new Float32Array(d), query)));
 
-  // Tertiary: also verify no OTHER employee is closer within margin
-  // (prevents edge-case where FaceMatcher picks wrong person)
+  // Tertiary: verify no OTHER employee is significantly closer
   const allEmpsWithFace = db.employees.filter(e => e._key !== emp._key && (e.faceDescriptors?.length > 0 || e.faceDescriptor));
   for (const other of allEmpsWithFace) {
     const otherDescs = (other.faceDescriptors || [other.faceDescriptor])
       .filter(d => Array.isArray(d) && d.length === 128);
     const otherMin = Math.min(...otherDescs.map(d => faceapi.euclideanDistance(new Float32Array(d), query)));
-    // If another person is almost as close (within 0.10), reject — ambiguous
-    if (otherMin < minDist + 0.10 && otherMin <= FACE_MATCH_THRESHOLD) return null;
+    // Only reject if another person is clearly closer (within 0.06 margin)
+    if (otherMin < minDist - 0.06 && otherMin <= FACE_MATCH_THRESHOLD) return null;
   }
 
   if (minDist > FACE_MATCH_THRESHOLD) return null;
