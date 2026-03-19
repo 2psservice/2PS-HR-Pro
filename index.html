@@ -84,6 +84,10 @@ tr:nth-child(even){background:#f8fafc;}
 .face-ring.red{box-shadow:0 0 0 3px rgba(239,68,68,.3),0 0 24px rgba(239,68,68,.4);}
 .face-ring.yellow{box-shadow:0 0 0 3px rgba(245,158,11,.3),0 0 16px rgba(245,158,11,.3);}
 .face-status-box{margin-top:14px;padding:12px 16px;border-radius:14px;text-align:center;font-size:13px;font-weight:600;transition:all .3s;}
+@keyframes liveMapPulse{
+  0%,100%{box-shadow:0 3px 10px rgba(0,0,0,.4);}
+  50%{box-shadow:0 0 0 8px rgba(34,197,94,.2),0 3px 10px rgba(0,0,0,.4);}
+}
 </style>
 </head>
 <body>
@@ -695,6 +699,10 @@ async function doLogin() {
       faceMatcherDirty = true;
       await loadAttendanceDate(todayStr);
       startApp();
+      // เริ่ม GPS tracking สำหรับทั้งพนักงานและหัวหน้างาน (ทันทีหลัง login)
+      if (CU.role === 'employee' || CU.role === 'supervisor') setTimeout(startLiveGpsTracking, 2000);
+      // Admin: เริ่ม SSE realtime listener สำหรับ liveTrack
+      if (CU.role === 'admin') setTimeout(startLiveTrackSSE, 1000);
     }
   } catch(e) {
     err.textContent = 'เชื่อมต่อ Firebase ไม่ได้: ' + e.message;
@@ -708,6 +716,8 @@ function doLogout() {
   CU = null;
   if (qrTimer) clearInterval(qrTimer);
   unsubscribeTodayListener();
+  stopLiveGpsTracking();
+  stopLiveTrackSSE();
   stopCam();
   document.getElementById('login-u').value = '';
   document.getElementById('login-p').value = '';
@@ -799,7 +809,16 @@ function openModal(title,body,footer=''){
   document.getElementById('modal-footer').innerHTML=footer;
   document.getElementById('modal').classList.add('active');
 }
-function closeModal(){document.getElementById('modal').classList.remove('active');}
+function closeModal(){
+  document.getElementById('modal').classList.remove('active');
+  // Cancel pending map creation timer
+  if (window._modalMapTimerId) { clearTimeout(window._modalMapTimerId); window._modalMapTimerId = null; }
+  // Destroy any Leaflet map inside modal to prevent memory leak
+  if (window._modalLeafletMap) {
+    try { window._modalLeafletMap.remove(); } catch(_) {}
+    window._modalLeafletMap = null;
+  }
+}
 
 // =====================================================================
 //  SIDEBAR + NAVIGATION
@@ -846,6 +865,7 @@ function getMenus(role){
     {tab:'sups',icon:'fas fa-user-tie',label:'กำหนดหัวหน้างาน'},
     {tab:'emps',icon:'fas fa-users',label:'กำหนดพนักงาน'},
     {tab:'wages',icon:'fas fa-money-bill-wave',label:'ตั้งค่าค่าแรง/OT'},
+    {tab:'org-chart',icon:'fas fa-project-diagram',label:'แผนผังองค์กร'},
     {div:1,label:'รายงาน'},
     {tab:'rpt-daily',icon:'fas fa-calendar-day',label:'สรุปประจำวัน'},
     {tab:'rpt-monthly',icon:'fas fa-calendar-alt',label:'สรุปประจำเดือน'},
@@ -857,6 +877,7 @@ function getMenus(role){
     {tab:'area-methods',icon:'fas fa-map-pin',label:'วิธีเช็คชื่อรายพื้นที่',c:'text-orange-400'},
     {tab:'device-bindings',icon:'fas fa-shield-alt',label:'Device Binding',c:'text-red-400'},
     {tab:'fraud-alerts',icon:'fas fa-exclamation-triangle',label:'แจ้งเตือนทุจริต',c:'text-orange-400'},
+    {tab:'live-track',icon:'fas fa-satellite-dish',label:'Live GPS Tracking',c:'text-green-400'},
     {tab:'manage-pwd',icon:'fas fa-key',label:'จัดการรหัสผ่าน'},
     {div:1,label:'จำลองระบบ'},
     {tab:'qr-page',icon:'fas fa-qrcode',label:'หน้าจอหัวหน้างาน',c:'text-blue-400'},
@@ -903,12 +924,37 @@ function goTab(tab,btn){
   renderPage(tab);
 }
 function renderPage(tab){
+  window._currentTab = tab;
+  // ---- Destroy Leaflet maps ก่อนเปลี่ยนหน้า ----
+  // Cancel pending modal map timer first
+  if (window._modalMapTimerId) { clearTimeout(window._modalMapTimerId); window._modalMapTimerId = null; }
+  if (typeof _liveTrackMap !== 'undefined' && _liveTrackMap) {
+    try { _liveTrackMap.remove(); } catch(_) {}
+    _liveTrackMap = null;
+    _liveTrackMarkers = {};
+  }
+  if (typeof _liveAutoRefreshId !== 'undefined' && _liveAutoRefreshId) {
+    clearInterval(_liveAutoRefreshId); _liveAutoRefreshId = null;
+  }
+  if (typeof _leafletMap !== 'undefined' && _leafletMap) {
+    try { _leafletMap.remove(); } catch(_) {}
+    _leafletMap = null;
+  }
+  if (typeof _miniMap !== 'undefined' && _miniMap) {
+    try { _miniMap.remove(); } catch(_) {}
+    _miniMap = null; _miniMarker = null; _miniCircle = null;
+  }
+  // ---- Destroy modal Leaflet map (sup GPS popup) ----
+  if (window._modalLeafletMap) {
+    try { window._modalLeafletMap.remove(); } catch(_) {}
+    window._modalLeafletMap = null;
+  }
   const mc=document.getElementById('main-content');mc.innerHTML='';
   const map={
-    dashboard:pgDashboard,depts:pgDepts,sups:pgSups,emps:pgEmps,wages:pgWages,
+    dashboard:pgDashboard,depts:pgDepts,sups:pgSups,emps:pgEmps,wages:pgWages,'org-chart':pgOrgChart,
     'rpt-daily':pgRptDaily,'rpt-monthly':pgRptMonthly,'rpt-sup':pgRptSup,'rpt-emp':pgRptEmp,
     'manage-pwd':pgManagePwd,'checkin-settings':pgCheckinSettings,
-    'area-methods':pgAreaMethods,'device-bindings':pgDeviceBindings,'fraud-alerts':pgFraudAlerts,
+    'area-methods':pgAreaMethods,'device-bindings':pgDeviceBindings,'fraud-alerts':pgFraudAlerts,'live-track':pgLiveTrack,
     'gps-locations':pgGpsLocations,
     'qr-page':pgQR,'checkin-page':pgCheckin,
     'sup-dash':pgSupDash,'sup-checkin':pgSupCheckin,'sup-emps':()=>pgEmps(CU.id),'add-emp-page':pgAddEmpForm,
@@ -1348,12 +1394,697 @@ window.delDept=async id=>{
 // =====================================================================
 //  SUPERVISORS  (Firebase CRUD)
 // =====================================================================
+
+// =====================================================================
+//  SUPERVISOR GPS TRACKING SYSTEM
+//  - Admin: ดูแผนที่ realtime ของหัวหน้าแต่ละคน
+//  - Supervisor: ส่ง GPS ทุก 45 นาที (เมื่อเปิดหน้าค้างไว้)
+//  - แจ้งเตือนเมื่อออกนอกพื้นที่
+// =====================================================================
+
+// =====================================================================
+//  LIVE GPS TRACKING — พนักงาน + หัวหน้างาน  (ทุก 10 นาที)
+//  เก็บที่ Firebase /liveTrack/{userId}  — Admin เห็นเท่านั้น
+// =====================================================================
+let _liveGpsIntervalId   = null;
+let _liveGpsLastAlertTs  = 0;
+const LIVE_GPS_INTERVAL_MS       = 5 * 60 * 1000;  // ส่ง GPS ทุก 5 นาที
+const LIVE_GPS_OFFSITE_ALERT_MS  = 10 * 60 * 1000;  // แจ้งซ้ำทุก 10 นาทีถ้านอกพื้นที่
+
+// เริ่ม tracking หลัง login (ทั้ง employee และ supervisor)
+async function startLiveGpsTracking() {
+  if (CU.role === 'admin') return;           // admin ไม่ต้องส่ง
+  if (!navigator.geolocation) return;
+  if (_liveGpsIntervalId) return;            // already running
+  await _sendLiveGps();                      // ส่งทันทีหลัง login
+  _liveGpsIntervalId = setInterval(_sendLiveGps, LIVE_GPS_INTERVAL_MS);
+}
+
+function stopLiveGpsTracking() {
+  if (_liveGpsIntervalId) { clearInterval(_liveGpsIntervalId); _liveGpsIntervalId = null; }
+}
+
+async function _sendLiveGps() {
+  if (!CU || CU.role === 'admin') return;
+  if (!navigator.geolocation) return;
+
+  // ดึงข้อมูลบุคคล
+  let person;
+  if (CU.role === 'supervisor') person = db.supervisors.find(s => s._key === CU.id);
+  else person = db.employees.find(e => e._key === CU.id);
+  if (!person) return;
+
+  try {
+    const pos = await new Promise((res, rej) =>
+      navigator.geolocation.getCurrentPosition(res, rej, {
+        enableHighAccuracy: true, timeout: 12000, maximumAge: 0
+      })
+    );
+    const lat = pos.coords.latitude;
+    const lng = pos.coords.longitude;
+    const acc = pos.coords.accuracy;
+    const ts  = Date.now();
+    const g   = gpsInAny(lat, lng);
+
+    // บันทึกลง Firebase (silently — ไม่แจ้งผู้ใช้)
+    const payload = {
+      lat, lng, acc, ts,
+      name:   person.name,
+      dept:   person.dept || '',
+      role:   CU.role,
+      inArea: g.ok,
+      dist:   g.dist,
+      loc:    g.loc
+    };
+    await fbSet('/liveTrack/' + CU.id, payload);
+    // อัพเดท supGpsTrack ด้วยเพื่อ backward compat กับหน้าแผนที่หัวหน้า
+    if (CU.role === 'supervisor') {
+      await fbSet('/supGpsTrack/' + CU.id, payload);
+    }
+
+    // แจ้งเตือนถ้าออกนอกพื้นที่ (throttle)
+    if (!g.ok && (ts - _liveGpsLastAlertTs) > LIVE_GPS_OFFSITE_ALERT_MS) {
+      _liveGpsLastAlertTs = ts;
+      await fbPush('/fraudAlerts', {
+        type:    CU.role === 'supervisor' ? 'SUP_OUT_OF_AREA' : 'EMP_OUT_OF_AREA',
+        empId:   CU.id, empName: person.name, dept: person.dept || '',
+        role:    CU.role,
+        rawLat:  lat, rawLng: lng, dist: g.dist, loc: g.loc,
+        accuracy: acc, timestamp: ts, dateStr: todayStr
+      });
+    }
+  } catch (_) {
+    // GPS ไม่พร้อม หรือผู้ใช้ปฏิเสธ — ไม่ทำอะไร
+  }
+}
+
+// Legacy alias สำหรับ backward compat
+function startSupGpsTracking() { startLiveGpsTracking(); }
+function stopSupGpsTracking()  { stopLiveGpsTracking();  }
+
+// Admin: เปิดแผนที่ดู GPS ของหัวหน้า
+window.openSupGpsMap = async function(supId, supName) {
+  // ดึงข้อมูลจาก 2 แหล่ง: supGpsTrack (เก่า) และ liveTrack (ใหม่กว่า)
+  const cached = (window._supGpsCache||{})[supId];
+  const [fresh, liveRaw] = await Promise.all([
+    fbGet('/supGpsTrack/' + supId),
+    fbGet('/liveTrack/' + supId)
+  ]);
+  if (fresh) { if (!window._supGpsCache) window._supGpsCache={}; window._supGpsCache[supId]=fresh; }
+  // เอาแหล่งที่ใหม่กว่า
+  const gps = [fresh, liveRaw, cached].filter(Boolean).sort((a,b)=>(b.ts||0)-(a.ts||0))[0] || null;
+  const hasGps = gps && gps.lat && gps.lng;
+  const gpsAge = gps ? Math.round((Date.now()-gps.ts)/60000) : null;
+  const gpsAgeStr = gpsAge===null ? '' : gpsAge<60 ? `${gpsAge} นาทีที่แล้ว` : `${Math.round(gpsAge/60)} ชม.ที่แล้ว`;
+  const mapsUrl = hasGps ? `https://www.google.com/maps?q=${gps.lat},${gps.lng}&z=17` : null;
+
+  const statusHtml = !hasGps
+    ? `<div style="background:#fef9c3;border-radius:10px;padding:12px 14px;margin-bottom:12px;font-size:13px;color:#92400e;display:flex;align-items:center;gap:8px;">
+        <i class="fas fa-exclamation-circle" style="color:#f59e0b;font-size:16px;"></i>
+        <div><div style="font-weight:700;">ยังไม่มีข้อมูลพิกัด</div><div style="font-size:11px;color:#94a3b8;margin-top:2px;">หัวหน้างานต้องเปิดแอปค้างไว้เพื่อส่ง GPS (ทุก 5 นาที)</div></div>
+      </div>`
+    : `<div style="background:${gps.inArea?'#dcfce7':'#fee2e2'};border-radius:10px;padding:10px 14px;margin-bottom:10px;display:flex;align-items:center;gap:12px;">
+        <i class="fas fa-map-marker-alt" style="color:${gps.inArea?'#16a34a':'#dc2626'};font-size:22px;flex-shrink:0;"></i>
+        <div style="flex:1;">
+          <div style="font-weight:700;font-size:14px;color:${gps.inArea?'#15803d':'#991b1b'};">
+            ${gps.inArea?'✅ อยู่ในพื้นที่':'🚨 อยู่นอกพื้นที่'}
+            ${!gps.inArea?`<span style="font-size:12px;color:#dc2626;margin-left:6px;">ห่าง ${Math.round(gps.dist||0)} ม.</span>`:''}
+          </div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px;">อัพเดต ${gpsAgeStr} · ความแม่นยำ ${Math.round(gps.acc||0)} ม.</div>
+        </div>
+        ${hasGps?`<a href="${mapsUrl}" target="_blank" style="background:#1a73e8;color:#fff;border-radius:8px;padding:6px 12px;font-size:11px;font-weight:700;text-decoration:none;white-space:nowrap;flex-shrink:0;"><i class="fas fa-external-link-alt mr-1"></i>Maps</a>`:''}
+      </div>`;
+
+  const body = `
+    <div>
+      ${statusHtml}
+      <div id="sup-gps-map-div" style="height:340px;border-radius:12px;overflow:hidden;margin-bottom:10px;border:1px solid #e2e8f0;background:#f1f5f9;">
+        <div style="height:100%;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:13px;">
+          <i class="fas fa-spinner fa-spin mr-2"></i>กำลังโหลดแผนที่...
+        </div>
+      </div>
+      <div style="background:#f8fafc;border-radius:8px;padding:10px 12px;font-size:11px;color:#64748b;">
+        <i class="fas fa-info-circle" style="color:#3b82f6;margin-right:5px;"></i>
+        ระบบส่ง GPS ทุก <strong>5 นาที</strong>
+        ${hasGps?`· <span style="font-family:monospace;">${gps.lat?.toFixed(5)}, ${gps.lng?.toFixed(5)}</span>`:''}
+      </div>
+    </div>`;
+
+  const footer = `
+    <button onclick="refreshSupGps('${supId.replace(/'/g,"\\'")}','${supName.replace(/'/g,"\\'")}') " class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium">
+      <i class="fas fa-sync mr-1"></i>โหลดใหม่
+    </button>
+    <button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-4 py-2 rounded-lg text-sm font-medium">ปิด</button>`;
+
+  openModal(`📍 ตำแหน่ง — ${supName}`, body, footer);
+
+  // Render Leaflet map after modal is in DOM
+  // ใช้ ID เพื่อ cancel ถ้ามีการปิด modal ก่อน
+  if (window._modalMapTimerId) { clearTimeout(window._modalMapTimerId); window._modalMapTimerId = null; }
+  window._modalMapTimerId = setTimeout(() => {
+    window._modalMapTimerId = null;
+    const mapDiv = document.getElementById('sup-gps-map-div');
+    // ตรวจว่า modal ยังเปิดอยู่และ element ยังอยู่ใน DOM จริง
+    const modal = document.getElementById('modal');
+    if (!mapDiv || !modal || !modal.classList.contains('active') || !document.body.contains(mapDiv)) return;
+    if (typeof L === 'undefined') return;
+
+    // Destroy map เก่าก่อนสร้างใหม่เสมอ
+    if (window._modalLeafletMap) {
+      try { window._modalLeafletMap.remove(); } catch(_) {}
+      window._modalLeafletMap = null;
+    }
+    mapDiv.innerHTML = '';
+
+    const defaultCenter = gpsLocations.length ? [gpsLocations[0].lat, gpsLocations[0].lng] : [13.756, 100.502];
+    const center = hasGps ? [gps.lat, gps.lng] : defaultCenter;
+
+    const map = L.map(mapDiv, { zoomControl: true }).setView(center, 15);
+    window._modalLeafletMap = map;
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19
+    }).addTo(map);
+
+    // วาดพื้นที่ทำงานทุกสถานที่ (วงกลม + หมายเลข)
+    const areaColors = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899'];
+    gpsLocations.forEach((loc, i) => {
+      const col = areaColors[i % areaColors.length];
+      L.circle([loc.lat, loc.lng], {
+        radius: loc.radius || 100,
+        color: col, fillColor: col, fillOpacity: 0.10, weight: 2, dashArray: '6,4'
+      }).addTo(map).bindPopup(`<b>${loc.name||'พื้นที่ '+(i+1)}</b><br>รัศมี ${loc.radius||100} ม.`);
+      const aIcon = L.divIcon({
+        html: `<div style="background:${col};color:#fff;border-radius:50%;width:30px;height:30px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.25);border:2px solid #fff;">${i+1}</div>`,
+        className:'', iconSize:[30,30], iconAnchor:[15,15]
+      });
+      L.marker([loc.lat, loc.lng], { icon: aIcon }).addTo(map)
+        .bindPopup(`<b>${loc.name||'พื้นที่ '+(i+1)}</b><br><span style="font-size:11px;color:#64748b;">${loc.lat?.toFixed(5)}, ${loc.lng?.toFixed(5)}</span>`);
+    });
+
+    // Marker ตำแหน่งหัวหน้างาน
+    if (hasGps) {
+      const col = gps.inArea ? '#16a34a' : '#dc2626';
+      const supIcon = L.divIcon({
+        html: `<div style="position:relative;">
+          <div style="background:${col};border:3px solid #fff;border-radius:50%;width:40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 3px 12px rgba(0,0,0,.4);">👤</div>
+          <div style="position:absolute;top:-2px;right:-2px;background:${col};border:2px solid #fff;border-radius:50%;width:13px;height:13px;"></div>
+        </div>`,
+        className:'', iconSize:[40,40], iconAnchor:[20,20]
+      });
+      L.marker([gps.lat, gps.lng], { icon: supIcon, zIndexOffset: 1000 }).addTo(map)
+        .bindPopup(`<b style="font-size:14px;">${supName}</b><br>
+          <span style="color:${col};font-weight:700;">${gps.inArea?'✅ อยู่ในพื้นที่':'🚨 อยู่นอกพื้นที่'}</span><br>
+          <span style="font-size:11px;color:#64748b;">อัพเดต ${gpsAge} น.ที่แล้ว</span>`)
+        .openPopup();
+    }
+
+    // fitBounds
+    if (hasGps && gpsLocations.length) {
+      const pts = [[gps.lat,gps.lng], ...gpsLocations.map(l=>[l.lat,l.lng])];
+      try { map.fitBounds(L.latLngBounds(pts), {padding:[50,50], maxZoom:15}); } catch(_) {}
+    } else if (gpsLocations.length > 1) {
+      try { map.fitBounds(L.latLngBounds(gpsLocations.map(l=>[l.lat,l.lng])), {padding:[40,40]}); } catch(_) {}
+    }
+
+    // Force resize (แก้ปัญหา Leaflet ไม่รู้ขนาด container)
+    setTimeout(() => { try { map.invalidateSize(); } catch(_) {} }, 100);
+  }, 350);
+};
+
+window.refreshSupGps = async function(supId, supName) {
+  closeModal();
+  await openSupGpsMap(supId, supName);
+};
+
+
+
+// =====================================================================
+//  ADMIN LIVE GPS TRACKING PAGE — REALTIME SSE
+//  Firebase SSE listener สำหรับ /liveTrack  → อัพเดทแผนที่ทันที
+// =====================================================================
+let _liveTrackMap       = null;
+let _liveTrackMarkers   = {};   // { id: L.marker }
+let _liveTrackLabels    = {};   // { id: L.divIcon html cache }
+let _liveTrackData      = {};   // { id: payload } — in-memory realtime cache
+let _liveSSE            = null; // Firebase SSE connection
+let _liveSSERetryTimer  = null;
+
+// ---- เริ่ม SSE listener สำหรับ /liveTrack (Admin เท่านั้น) ----
+function startLiveTrackSSE() {
+  if (_liveSSE) return; // already connected
+  _subscribeLiveSSE();
+}
+
+function stopLiveTrackSSE() {
+  if (_liveSSE) { try { _liveSSE.close(); } catch(_) {} _liveSSE = null; }
+  if (_liveSSERetryTimer) { clearTimeout(_liveSSERetryTimer); _liveSSERetryTimer = null; }
+}
+
+function _subscribeLiveSSE() {
+  try {
+    const url = `${FB}/liveTrack.json?auth=${FB_KEY}`;
+    const sse = new EventSource(url);
+    _liveSSE = sse;
+
+    sse.addEventListener('put', e => {
+      try {
+        const payload = JSON.parse(e.data);
+        if (!payload) return;
+        if (payload.path === '/') {
+          // Full snapshot
+          _liveTrackData = payload.data ? Object.fromEntries(
+            Object.entries(payload.data).map(([k,v]) => [k, {id:k,...v}])
+          ) : {};
+        } else {
+          const id = payload.path.replace(/^\//, '').split('/')[0];
+          if (payload.data === null) { delete _liveTrackData[id]; }
+          else { _liveTrackData[id] = { id, ...(_liveTrackData[id]||{}), ...payload.data }; }
+        }
+        _onLiveDataChanged();
+      } catch(_) {}
+    });
+
+    sse.addEventListener('patch', e => {
+      try {
+        const payload = JSON.parse(e.data);
+        if (payload && payload.data) {
+          Object.entries(payload.data).forEach(([id, val]) => {
+            if (val === null) delete _liveTrackData[id];
+            else _liveTrackData[id] = { id, ...(_liveTrackData[id]||{}), ...val };
+          });
+          _onLiveDataChanged();
+        }
+      } catch(_) {}
+    });
+
+    sse.onerror = () => {
+      sse.close(); _liveSSE = null;
+      // retry in 10s
+      _liveSSERetryTimer = setTimeout(_subscribeLiveSSE, 10000);
+    };
+  } catch(_) {
+    // SSE not supported — fallback poll
+    _liveSSERetryTimer = setInterval(async () => {
+      const raw = await fbGet('/liveTrack').catch(()=>null);
+      if (raw) {
+        _liveTrackData = Object.fromEntries(Object.entries(raw).map(([k,v])=>[k,{id:k,...v}]));
+        _onLiveDataChanged();
+      }
+    }, 15000);
+  }
+}
+
+// เรียกทุกครั้งที่ข้อมูลเปลี่ยน — อัพเดท map + list ถ้าหน้า live-track เปิดอยู่
+function _onLiveDataChanged() {
+  _updateLiveMapMarkers();
+  _updateLiveList();
+  _updateLiveHeader();
+}
+
+// ---- helper: สี + อายุ ----
+function _liveAgeStr(ts) {
+  if (!ts) return '?';
+  const m = Math.round((Date.now()-ts)/60000);
+  return m < 1 ? 'เพิ่งอัพเดต' : m < 60 ? `${m}น.` : `${Math.round(m/60)}ชม.`;
+}
+function _liveIsOnline(ts) { return ts && (Date.now()-ts) < 10*60*1000; } // ≤ 10 นาที = online
+
+// ---- อัพเดท header counters ----
+function _updateLiveHeader() {
+  const all = Object.values(_liveTrackData).filter(d => d.lat && d.lng);
+  const online = all.filter(d => _liveIsOnline(d.ts));
+  const countEl = document.getElementById('live-track-count');
+  const onlineEl = document.getElementById('live-online-count');
+  const tsEl = document.getElementById('live-track-ts');
+  if (countEl) countEl.textContent = `${all.length} คน`;
+  if (onlineEl) onlineEl.textContent = `🟢 Online ${online.length}`;
+  if (tsEl) tsEl.textContent = 'อัพเดต ' + new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+
+// ---- อัพเดท Leaflet markers แบบ smooth (เพิ่ม/ลบ/ย้าย) ----
+function _updateLiveMapMarkers() {
+  if (!_liveTrackMap) return;
+  const data = Object.values(_liveTrackData).filter(d => d.lat && d.lng);
+  const ids  = new Set(data.map(d => d.id));
+
+  // ลบ marker ที่หายไป
+  Object.keys(_liveTrackMarkers).forEach(id => {
+    if (!ids.has(id)) { try { _liveTrackMarkers[id].remove(); } catch(_){} delete _liveTrackMarkers[id]; }
+  });
+
+  data.forEach(d => {
+    const isSup    = d.role === 'supervisor';
+    const isOnline = _liveIsOnline(d.ts);
+    const col      = d.inArea ? '#16a34a' : '#dc2626';
+    const age      = _liveAgeStr(d.ts);
+    const pulse    = isOnline ? `animation:liveMapPulse 1.8s ease-in-out infinite;` : '';
+    const size     = isSup ? 44 : 36;
+    const emoji    = isSup ? '👔' : '🧑';
+
+    const iconHtml = `
+      <div style="position:relative;display:inline-block;">
+        <div style="background:${col};border:3px solid #fff;border-radius:50%;
+          width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;
+          font-size:${isSup?18:15}px;box-shadow:0 3px 10px rgba(0,0,0,.4);${pulse}">
+          ${emoji}
+        </div>
+        ${isOnline ? `<div style="position:absolute;top:-2px;right:-2px;width:11px;height:11px;
+          background:#22c55e;border:2px solid #fff;border-radius:50%;
+          box-shadow:0 0 0 2px rgba(34,197,94,.4);"></div>` : ''}
+        <div style="position:absolute;top:${size+2}px;left:50%;transform:translateX(-50%);
+          background:rgba(15,23,42,.85);color:#fff;border-radius:6px;padding:2px 7px;
+          font-size:10px;font-weight:700;white-space:nowrap;pointer-events:none;
+          font-family:Sarabun,sans-serif;">
+          ${d.name}
+        </div>
+      </div>`;
+
+    const icon = L.divIcon({
+      html: iconHtml,
+      className: '',
+      iconSize:   [size, size + 22],
+      iconAnchor: [size/2, size/2]
+    });
+
+    const popupHtml = `
+      <div style="min-width:200px;font-family:Sarabun,sans-serif;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+          <div style="background:${col};width:38px;height:38px;border-radius:50%;display:flex;
+            align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">${emoji}</div>
+          <div>
+            <div style="font-weight:700;font-size:14px;color:#1e293b;">${d.name}</div>
+            <div style="font-size:11px;color:#64748b;">${d.dept||''} · ${isSup?'หัวหน้างาน':'พนักงาน'}</div>
+            <div style="font-size:11px;margin-top:2px;">
+              ${isOnline
+                ? '<span style="color:#16a34a;font-weight:700;">🟢 Online</span>'
+                : `<span style="color:#94a3b8;">⚫ ${age}ที่แล้ว</span>`}
+            </div>
+          </div>
+        </div>
+        <div style="background:${d.inArea?'#dcfce7':'#fee2e2'};border-radius:8px;padding:8px 10px;margin-bottom:8px;">
+          <div style="font-weight:700;font-size:13px;color:${d.inArea?'#15803d':'#991b1b'};">
+            ${d.inArea ? '✅ อยู่ในพื้นที่' : '🚨 อยู่นอกพื้นที่'}
+          </div>
+          ${!d.inArea ? `<div style="font-size:11px;color:#dc2626;">ห่าง ${Math.round(d.dist||0)} ม. ${d.loc?'· '+d.loc:''}</div>` : ''}
+        </div>
+        <div style="font-size:11px;color:#64748b;margin-bottom:8px;">
+          <i class="fas fa-crosshairs" style="margin-right:4px;"></i>ความแม่นยำ ${Math.round(d.acc||0)} ม.
+          · ${age}ที่แล้ว
+        </div>
+        <a href="https://maps.google.com/?q=${d.lat},${d.lng}" target="_blank"
+          style="display:block;background:#1a73e8;color:#fff;border-radius:8px;padding:7px;
+            text-align:center;font-size:12px;font-weight:700;text-decoration:none;">
+          <i class="fas fa-map mr-1"></i>เปิดใน Google Maps
+        </a>
+      </div>`;
+
+    if (_liveTrackMarkers[d.id]) {
+      // อัพเดท marker ที่มีอยู่แล้ว
+      _liveTrackMarkers[d.id].setLatLng([d.lat, d.lng]);
+      _liveTrackMarkers[d.id].setIcon(icon);
+      _liveTrackMarkers[d.id].setPopupContent(popupHtml);
+    } else {
+      // สร้าง marker ใหม่
+      const marker = L.marker([d.lat, d.lng], { icon, zIndexOffset: isSup?500:0 })
+        .addTo(_liveTrackMap)
+        .bindPopup(popupHtml, { maxWidth: 240 });
+      _liveTrackMarkers[d.id] = marker;
+    }
+  });
+}
+
+// ---- อัพเดทรายการด้านขวา ----
+function _updateLiveList() {
+  const listWrap = document.getElementById('live-list-wrap');
+  if (!listWrap) return;
+
+  const now  = Date.now();
+  const all  = Object.values(_liveTrackData).filter(d => d.lat && d.lng);
+  const online = all.filter(d => _liveIsOnline(d.ts)).length;
+  const listCount = document.getElementById('live-list-count');
+  if (listCount) listCount.textContent = `${all.length} คน · 🟢 ${online}`;
+  const sorted = [...all].sort((a,b) => {
+    // online ก่อน, นอกพื้นที่ก่อน
+    const ao = _liveIsOnline(a.ts) ? 1 : 0;
+    const bo = _liveIsOnline(b.ts) ? 1 : 0;
+    if (ao !== bo) return bo - ao;
+    if (a.inArea !== b.inArea) return a.inArea ? 1 : -1;
+    return (b.ts||0) - (a.ts||0);
+  });
+
+  if (!sorted.length) {
+    listWrap.innerHTML = `<div style="text-align:center;padding:40px 16px;color:#94a3b8;font-size:13px;">
+      <i class="fas fa-satellite-dish" style="font-size:32px;display:block;margin-bottom:10px;opacity:.3;"></i>
+      ยังไม่มีข้อมูล GPS<br><span style="font-size:11px;">พนักงานต้องเปิดแอปค้างไว้</span>
+    </div>`;
+    return;
+  }
+
+  listWrap.innerHTML = sorted.map(d => {
+    const isOnline = _liveIsOnline(d.ts);
+    const isSup    = d.role === 'supervisor';
+    const col      = d.inArea ? '#16a34a' : '#dc2626';
+    const age      = _liveAgeStr(d.ts);
+    return `
+    <div onclick="focusLiveMarker('${d.id}')"
+      style="background:#fff;border-radius:12px;padding:11px 13px;cursor:pointer;
+        border:2px solid ${d.inArea ? (isOnline?'#bbf7d0':'#e2e8f0') : '#fecaca'};
+        transition:all .15s;"
+      onmouseover="this.style.boxShadow='0 4px 12px rgba(0,0,0,.1)';this.style.transform='translateY(-1px)'"
+      onmouseout="this.style.boxShadow='';this.style.transform=''">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div style="position:relative;flex-shrink:0;">
+          <div style="background:${col};color:#fff;border-radius:50%;width:38px;height:38px;
+            display:flex;align-items:center;justify-content:center;font-size:17px;">
+            ${isSup ? '👔' : '🧑'}
+          </div>
+          ${isOnline
+            ? `<div style="position:absolute;bottom:0;right:0;width:11px;height:11px;
+                background:#22c55e;border:2px solid #fff;border-radius:50%;"></div>`
+            : `<div style="position:absolute;bottom:0;right:0;width:11px;height:11px;
+                background:#94a3b8;border:2px solid #fff;border-radius:50%;"></div>`}
+        </div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:700;font-size:13px;color:#1e293b;
+            white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${d.name}</div>
+          <div style="font-size:10px;color:#94a3b8;">${d.dept||''} · ${isSup?'หัวหน้า':'พนักงาน'}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;">
+          <div style="font-size:11px;font-weight:700;color:${col};">
+            ${d.inArea ? '✅ ในพื้นที่' : '🚨 นอก'}
+          </div>
+          <div style="font-size:10px;margin-top:2px;">
+            ${isOnline
+              ? '<span style="color:#16a34a;font-weight:700;">🟢 Online</span>'
+              : `<span style="color:#94a3b8;">${age}</span>`}
+          </div>
+        </div>
+      </div>
+      ${!d.inArea ? `<div style="margin-top:6px;background:#fef2f2;border-radius:6px;
+        padding:3px 8px;font-size:10px;color:#dc2626;">
+        ห่าง ${Math.round(d.dist||0)} ม. ${d.loc?'· '+d.loc:''}
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+let _liveTrackRefreshId = null;
+
+async function pgLiveTrack() {
+  const mc = document.getElementById('main-content');
+  mc.innerHTML = `
+    <style>
+      @keyframes liveMapPulse {
+        0%,100%{ box-shadow:0 3px 10px rgba(0,0,0,.4); }
+        50%{ box-shadow:0 0 0 8px rgba(34,197,94,.2),0 3px 10px rgba(0,0,0,.4); }
+      }
+    </style>
+    <div style="display:flex;justify-content:space-between;align-items:center;
+      margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <h3 style="font-size:15px;font-weight:700;color:#1e293b;display:flex;align-items:center;
+          gap:8px;border-left:4px solid #10b981;padding-left:10px;margin:0;">
+          <i class="fas fa-satellite-dish" style="color:#10b981;"></i> Live GPS Tracking
+        </h3>
+        <span id="live-track-count" style="background:#f1f5f9;color:#64748b;
+          font-size:12px;padding:3px 10px;border-radius:20px;font-weight:600;"></span>
+        <span id="live-online-count" style="background:#dcfce7;color:#15803d;
+          font-size:12px;padding:3px 10px;border-radius:20px;font-weight:700;"></span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span id="live-track-ts" style="font-size:11px;color:#94a3b8;"></span>
+        <div id="live-sse-badge"
+          style="background:#dcfce7;color:#15803d;border-radius:8px;padding:5px 10px;
+            font-size:11px;font-weight:700;display:flex;align-items:center;gap:5px;">
+          <span style="width:7px;height:7px;background:#22c55e;border-radius:50%;
+            display:inline-block;animation:liveMapPulse 1.5s infinite;"></span>
+          Realtime
+        </div>
+        <button onclick="refreshLiveTrack()"
+          style="background:#10b981;color:#fff;border:none;border-radius:8px;
+            padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;
+            font-family:Sarabun,sans-serif;">
+          <i class="fas fa-sync mr-1"></i>รีเฟรช
+        </button>
+        <button id="live-fit-btn" onclick="fitAllMarkers()"
+          style="background:#f1f5f9;color:#475569;border:none;border-radius:8px;
+            padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;
+            font-family:Sarabun,sans-serif;">
+          <i class="fas fa-compress-arrows-alt mr-1"></i>Fit All
+        </button>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 300px;gap:12px;
+      height:calc(100vh - 178px);min-height:500px;">
+      <!-- แผนที่ -->
+      <div id="live-map-wrap" style="border-radius:14px;overflow:hidden;
+        border:1px solid #e2e8f0;background:#f1f5f9;position:relative;">
+        <div id="live-map-loading" style="height:100%;display:flex;align-items:center;
+          justify-content:center;color:#94a3b8;font-size:14px;">
+          <i class="fas fa-spinner fa-spin mr-2"></i>กำลังโหลดแผนที่...
+        </div>
+      </div>
+      <!-- รายการ -->
+      <div style="display:flex;flex-direction:column;gap:0;">
+        <div style="font-size:12px;font-weight:700;color:#64748b;margin-bottom:8px;
+          padding:0 4px;display:flex;justify-content:space-between;align-items:center;">
+          <span>รายชื่อทั้งหมด</span>
+          <span id="live-list-count" style="color:#94a3b8;font-weight:400;font-size:11px;"></span>
+        </div>
+        <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;"
+          id="live-list-wrap">
+          <div style="text-align:center;padding:32px;color:#94a3b8;font-size:13px;">
+            <i class="fas fa-spinner fa-spin" style="font-size:20px;display:block;margin-bottom:8px;"></i>
+            กำลังโหลด...
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  setTimeout(async () => {
+    _initLiveMap();
+    // โหลด snapshot ครั้งแรก
+    const raw = await fbGet('/liveTrack').catch(()=>null);
+    if (raw) {
+      _liveTrackData = Object.fromEntries(
+        Object.entries(raw).map(([k,v]) => [k, {id:k,...v}])
+      );
+      _onLiveDataChanged();
+      // fitBounds หลังโหลดครั้งแรก
+      const pts = Object.values(_liveTrackData)
+        .filter(d=>d.lat&&d.lng).map(d=>[d.lat,d.lng]);
+      if (pts.length > 1) {
+        try { _liveTrackMap.fitBounds(L.latLngBounds(pts),{padding:[40,40],maxZoom:15}); } catch(_){}
+      }
+    } else {
+      _onLiveDataChanged(); // render empty state
+    }
+    // เริ่ม SSE realtime
+    startLiveTrackSSE();
+  }, 250);
+}
+
+function _initLiveMap() {
+  const wrap = document.getElementById('live-map-wrap');
+  if (!wrap || typeof L === 'undefined') return;
+  // ลบ loading div แล้วสร้าง map div
+  const loading = document.getElementById('live-map-loading');
+  if (loading) loading.remove();
+  const mapDiv = document.createElement('div');
+  mapDiv.id = 'live-map';
+  mapDiv.style.cssText = 'height:100%;width:100%;';
+  wrap.appendChild(mapDiv);
+
+  if (_liveTrackMap) { try { _liveTrackMap.remove(); } catch(_){} _liveTrackMap = null; }
+
+  const center = gpsLocations.length
+    ? [gpsLocations[0].lat, gpsLocations[0].lng]
+    : [13.756, 100.502];
+  _liveTrackMap = L.map('live-map', { zoomControl: true }).setView(center, 13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap', maxZoom: 19
+  }).addTo(_liveTrackMap);
+
+  // วาดพื้นที่ทำงาน
+  const areaColors = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4'];
+  gpsLocations.forEach((loc, i) => {
+    const col = areaColors[i % areaColors.length];
+    L.circle([loc.lat, loc.lng], {
+      radius: loc.radius||100, color: col, fillColor: col,
+      fillOpacity: 0.08, weight: 2, dashArray: '6,4'
+    }).addTo(_liveTrackMap)
+      .bindPopup(`<b>${loc.name||'พื้นที่ '+(i+1)}</b><br>รัศมี ${loc.radius||100} ม.`);
+    const aIcon = L.divIcon({
+      html: `<div style="background:${col};color:#fff;border-radius:50%;width:26px;height:26px;
+        display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;
+        box-shadow:0 2px 6px rgba(0,0,0,.25);border:2px solid #fff;">${i+1}</div>`,
+      className:'', iconSize:[26,26], iconAnchor:[13,13]
+    });
+    L.marker([loc.lat, loc.lng], { icon: aIcon }).addTo(_liveTrackMap)
+      .bindPopup(`<b>${loc.name||'พื้นที่ '+(i+1)}</b>`);
+  });
+  _liveTrackMarkers = {};
+}
+
+// fallback manual refresh (ยังคงทำงานได้)
+window.refreshLiveTrack = async function() {
+  const tsEl = document.getElementById('live-track-ts');
+  if (tsEl) tsEl.textContent = 'กำลังโหลด...';
+  const raw = await fbGet('/liveTrack').catch(()=>null);
+  if (raw) {
+    _liveTrackData = Object.fromEntries(
+      Object.entries(raw).map(([k,v]) => [k, {id:k,...v}])
+    );
+    _onLiveDataChanged();
+  }
+  // อัพเดท supGpsCache ด้วย
+  if (!window._supGpsCache) window._supGpsCache = {};
+  Object.values(_liveTrackData).forEach(d => {
+    if (d.role==='supervisor') window._supGpsCache[d.id] = d;
+  });
+};
+
+window.focusLiveMarker = function(id) {
+  const marker = _liveTrackMarkers[id];
+  if (!marker || !_liveTrackMap) return;
+  _liveTrackMap.setView(marker.getLatLng(), 16, { animate: true });
+  marker.openPopup();
+};
+
+window.fitAllMarkers = function() {
+  if (!_liveTrackMap) return;
+  const pts = [
+    ...Object.values(_liveTrackData).filter(d=>d.lat&&d.lng).map(d=>[d.lat,d.lng]),
+    ...gpsLocations.map(l=>[l.lat,l.lng])
+  ];
+  if (pts.length > 1) {
+    try { _liveTrackMap.fitBounds(L.latLngBounds(pts),{padding:[40,40],maxZoom:15}); } catch(_){}
+  }
+};
+
+let _liveAutoRefreshId = null;
+window.toggleLiveAuto = function() {};  // legacy — SSE handles this now
+
+
 function pgSups(){
   const mc=document.getElementById('main-content');
+  // Preload GPS cache
+  if (!window._supGpsCache) window._supGpsCache = {};
+  fbGet('/supGpsTrack').then(d => {
+    if (d) { Object.entries(d).forEach(([k,v]) => { window._supGpsCache[k] = v; }); if(window._currentTab==='sups') pgSups(); }
+  });
   mc.innerHTML=card(sHead('รายชื่อหัวหน้างาน',Btn('<i class="fas fa-plus mr-1"></i>เพิ่มหัวหน้างาน','addSup()'))
-    +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','สายงาน','Username','รหัสผ่าน','ลูกน้อง','จัดการ')}
-    <tbody>${db.supervisors.length===0?EmptyR(7):db.supervisors.map(s=>{
+    +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','สายงาน','Username','รหัสผ่าน','ลูกน้อง','เช็คพิกัด','จัดการ')}
+    <tbody>${db.supervisors.length===0?EmptyR(8):db.supervisors.map(s=>{
       const subs=db.employees.filter(e=>e.supId===s._key).length;
+      const lastGps = (window._supGpsCache||{})[s._key];
+      const gpsAge = lastGps ? Math.round((Date.now()-lastGps.ts)/60000) : null;
+      const gpsLabel = gpsAge===null ? '<span style="color:#94a3b8;font-size:11px;">ยังไม่มีข้อมูล</span>'
+        : gpsAge < 50 ? `<span style="color:#16a34a;font-size:11px;"><i class="fas fa-circle" style="font-size:7px;margin-right:3px;animation:pulse 2s infinite;"></i>${gpsAge}น.ที่แล้ว</span>`
+        : `<span style="color:#f59e0b;font-size:11px;">${gpsAge}น.ที่แล้ว</span>`;
       return`<tr class="hover:bg-gray-50" id="sup-row-${s._key}">
         <td class="px-4 py-3 font-mono text-gray-400 text-xs">${s._key}</td>
         <td class="px-4 py-3 font-medium">${s.name}</td>
@@ -1362,11 +2093,20 @@ function pgSups(){
         <td class="px-4 py-3">
           <div style="display:flex;align-items:center;gap:6px;">
             <span id="sup-pwd-text-${s._key}" style="font-family:monospace;font-size:12px;color:#1e293b;">••••••</span>
-            <button onclick="toggleSupPwdView('${s._key}','${(s.password||'').replace(/'/g,"\'")}')" style="background:none;border:none;cursor:pointer;color:#94a3b8;padding:2px 4px;font-size:12px;" title="แสดง/ซ่อน"><i class="fas fa-eye" id="sup-pwd-eye-${s._key}"></i></button>
-            <button onclick="adminEditSupPwd('${s._key}','${s.name.replace(/'/g,"\'")}')" style="background:#f1f5f9;border:1px solid #e2e8f0;cursor:pointer;color:#475569;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;" title="เปลี่ยนรหัสผ่าน"><i class="fas fa-key" style="margin-right:3px;"></i>เปลี่ยน</button>
+            <button onclick="toggleSupPwdView('${s._key}','${(s.password||'').replace(/'/g,"\\'")}')" style="background:none;border:none;cursor:pointer;color:#94a3b8;padding:2px 4px;font-size:12px;"><i class="fas fa-eye" id="sup-pwd-eye-${s._key}"></i></button>
+            <button onclick="adminEditSupPwd('${s._key}','${s.name.replace(/'/g,"\\'")}')" style="background:#f1f5f9;border:1px solid #e2e8f0;cursor:pointer;color:#475569;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;"><i class="fas fa-key" style="margin-right:3px;"></i>เปลี่ยน</button>
           </div>
         </td>
         <td class="px-4 py-3">${bdg('blue',subs+' คน')}</td>
+        <td class="px-4 py-3">
+          <div style="display:flex;align-items:center;gap:6px;">
+            ${gpsLabel}
+            <button onclick="openSupGpsMap('${s._key}','${s.name.replace(/'/g,"\\'")}')"
+              style="background:#0f172a;color:#38bdf8;border:none;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:4px;white-space:nowrap;">
+              <i class="fas fa-map-marker-alt"></i> แผนที่
+            </button>
+          </div>
+        </td>
         <td class="px-4 py-3 flex gap-3">
           <button onclick="delSup('${s._key}')" class="text-red-500 text-sm hover:underline">ลบ</button>
         </td></tr>`;
@@ -1455,8 +2195,8 @@ window.addSup=()=>{
 window.saveSup=async()=>{
   const n=document.getElementById('m-sn').value.trim(),d=document.getElementById('m-sd').value;
   const u=document.getElementById('m-su').value.trim(),p=document.getElementById('m-sp').value.trim();
-  if(!n||!u||!p)return alert('กรุณากรอกข้อมูลให้ครบ');
-  if(db.supervisors.find(s=>s.username===u))return alert('Username นี้ถูกใช้แล้ว');
+  if(!n||!u||!p){alert('กรุณากรอกข้อมูลให้ครบ');return;}
+  if(db.supervisors.find(s=>s.username===u)){alert('Username นี้ถูกใช้แล้ว');return;}
   showSync();
   const res=await fbPush('/supervisors',{name:n,dept:d,username:u,password:p});
   db.supervisors.push({_key:res.name,name:n,dept:d,username:u,password:p});
@@ -1814,6 +2554,10 @@ window.saveEmp=async function(){
   const u=document.getElementById('m-eu').value.trim(),pw=document.getElementById('m-epwd').value.trim();
   const ekey=document.getElementById('m-eid').value;
   if(!n)return alert('กรุณากรอกชื่อ');
+  if(!ekey){
+    if(!u||!pw){alert('กรุณากรอก Username และ Password');return;}
+    if(db.employees.find(e=>e.username===u)){alert('Username นี้ถูกใช้แล้ว');return;}
+  }
   showSync();
   if(ekey){
     const upd={name:n,phone:ph,wage:w,dept:d,sup:sNm,supId:sId,username:u};
@@ -1823,8 +2567,6 @@ window.saveEmp=async function(){
     const idx=db.employees.findIndex(x=>x._key===ekey);
     if(idx>=0)db.employees[idx]={...db.employees[idx],...upd};
   } else {
-    if(!u||!pw)return alert('กรุณากรอก Username และ Password');
-    if(db.employees.find(e=>e.username===u))return alert('Username นี้ถูกใช้แล้ว');
     const rec={name:n,phone:ph,dept:d,sup:sNm,supId:sId,wage:w,username:u,password:pw};
     if(ot>0)rec.otRate=ot;
     const res=await fbPush('/employees',rec);
@@ -2826,44 +3568,146 @@ window.selectSearchResult = function(lat, lon, displayName) {
 };
 function pgManagePwd(){
   const mc=document.getElementById('main-content');
+  const supRows = s => `<tr class="hover:bg-gray-50" id="mpwd-sup-${s._key}">
+    <td class="px-3 py-2.5 font-medium text-sm">${s.name}</td>
+    <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${s.username}</td>
+    <td class="px-3 py-2.5">
+      <div style="display:flex;align-items:center;gap:5px;">
+        <span id="mpwd-sup-val-${s._key}" style="font-family:monospace;font-size:12px;color:#1e293b;min-width:60px;">••••••</span>
+        <button onclick="window._mpwdToggle('sup','${s._key}','${(s.password||'').replace(/'/g,"\\'")}')"
+          style="background:none;border:none;cursor:pointer;color:#94a3b8;font-size:12px;padding:2px;">
+          <i class="fas fa-eye" id="mpwd-sup-eye-${s._key}"></i></button>
+        <button onclick="window._mpwdEdit('sup','${s._key}','${s.name.replace(/'/g,"\\'")}')"
+          style="background:#ede9fe;border:none;cursor:pointer;color:#7c3aed;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;font-family:Sarabun,sans-serif;">
+          <i class="fas fa-edit" style="margin-right:3px;"></i>แก้ไข</button>
+      </div>
+    </td>
+  </tr>`;
+  const empRows2 = e => `<tr class="hover:bg-gray-50" id="mpwd-emp-${e._key}">
+    <td class="px-3 py-2.5 font-medium text-sm">${e.name}</td>
+    <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${e.username}</td>
+    <td class="px-3 py-2.5">
+      <div style="display:flex;align-items:center;gap:5px;">
+        <span id="mpwd-emp-val-${e._key}" style="font-family:monospace;font-size:12px;color:#1e293b;min-width:60px;">••••••</span>
+        <button onclick="window._mpwdToggle('emp','${e._key}','${(e.password||'').replace(/'/g,"\\'")}')"
+          style="background:none;border:none;cursor:pointer;color:#94a3b8;font-size:12px;padding:2px;">
+          <i class="fas fa-eye" id="mpwd-emp-eye-${e._key}"></i></button>
+        <button onclick="window._mpwdEdit('emp','${e._key}','${e.name.replace(/'/g,"\\'")}')"
+          style="background:#ede9fe;border:none;cursor:pointer;color:#7c3aed;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;font-family:Sarabun,sans-serif;">
+          <i class="fas fa-edit" style="margin-right:3px;"></i>แก้ไข</button>
+      </div>
+    </td>
+  </tr>`;
   mc.innerHTML=`<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
     ${card(`${sHead('รหัสผ่านหัวหน้างาน')}
     <input type="text" id="spwd-search" placeholder="ค้นหาชื่อ/username..." class="w-full border rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1" oninput="filterSupPwd(this.value)">
-    <div style="max-height:400px;overflow-y:auto;">
-    <table class="min-w-full text-sm">${THead('ชื่อ','Username','จัดการ')}
-    <tbody id="sup-pwd-tbody">${db.supervisors.map(s=>`<tr class="hover:bg-gray-50">
-      <td class="px-4 py-2.5 font-medium">${s.name}</td>
-      <td class="px-4 py-2.5 font-mono text-blue-700 text-xs">${s.username}</td>
-      <td class="px-4 py-2.5"><button onclick="editSupPwd('${s._key}')" class="text-purple-600 text-sm hover:underline"><i class="fas fa-key mr-1"></i>เปลี่ยนรหัส</button></td>
-    </tr>`).join('')}</tbody></table></div>`)}
+    <div style="max-height:420px;overflow-y:auto;">
+    <table class="min-w-full text-sm">${THead('ชื่อ','Username','รหัสผ่าน')}
+    <tbody id="sup-pwd-tbody">${db.supervisors.map(supRows).join('')}</tbody></table></div>`)}
     ${card(`${sHead('รหัสผ่านพนักงาน')}
     <input type="text" id="epwd-search" placeholder="ค้นหาชื่อ/username..." class="w-full border rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1" oninput="filterEmpPwd(this.value)">
-    <div style="max-height:400px;overflow-y:auto;">
-    <table class="min-w-full text-sm">${THead('ชื่อ','Username','จัดการ')}
-    <tbody id="emp-pwd-tbody">${db.employees.map(e=>`<tr class="hover:bg-gray-50">
-      <td class="px-4 py-2.5 font-medium">${e.name}</td>
-      <td class="px-4 py-2.5 font-mono text-blue-700 text-xs">${e.username}</td>
-      <td class="px-4 py-2.5"><button onclick="empPwd('${e._key}')" class="text-purple-600 text-sm hover:underline"><i class="fas fa-key mr-1"></i>เปลี่ยนรหัส</button></td>
-    </tr>`).join('')}</tbody></table></div>`)}
+    <div style="max-height:420px;overflow-y:auto;">
+    <table class="min-w-full text-sm">${THead('ชื่อ','Username','รหัสผ่าน')}
+    <tbody id="emp-pwd-tbody">${db.employees.map(empRows2).join('')}</tbody></table></div>`)}
   </div>`;
 }
+
+window._mpwdToggle = function(type, key, pwd) {
+  const valEl = document.getElementById(`mpwd-${type}-val-${key}`);
+  const eyeEl = document.getElementById(`mpwd-${type}-eye-${key}`);
+  if (!valEl) return;
+  if (valEl.textContent === '••••••') {
+    valEl.textContent = pwd || '(ไม่มี)'; valEl.style.color='#1d4ed8';
+    if(eyeEl) eyeEl.className='fas fa-eye-slash';
+  } else {
+    valEl.textContent = '••••••'; valEl.style.color='#1e293b';
+    if(eyeEl) eyeEl.className='fas fa-eye';
+  }
+};
+
+window._mpwdEdit = function(type, key, name) {
+  const curObj = type==='sup'
+    ? db.supervisors.find(s=>s._key===key)
+    : db.employees.find(e=>e._key===key);
+  if(!curObj) return;
+  openModal(`🔑 เปลี่ยนรหัสผ่าน — ${name}`,
+    `<div class="space-y-4">
+      <div style="background:#f8fafc;border-radius:10px;padding:12px 16px;font-size:13px;color:#475569;">
+        <i class="fas fa-${type==='sup'?'user-tie':'user'} mr-2 text-purple-500"></i><strong>${name}</strong>
+        <span style="margin-left:8px;color:#94a3b8;">@${curObj.username}</span>
+      </div>
+      <div>
+        <label class="text-sm font-medium text-gray-700 block mb-1">รหัสผ่านปัจจุบัน</label>
+        <div style="background:#f1f5f9;border-radius:8px;padding:10px 14px;font-family:monospace;font-size:14px;color:#1d4ed8;
+          display:flex;align-items:center;justify-content:space-between;">
+          <span id="_mpwd_cur_disp">••••••</span>
+          <button onclick="const el=document.getElementById('_mpwd_cur_disp');el.textContent=el.textContent==='••••••'?'${(curObj.password||'').replace(/'/g,"\\'")}':'••••••'"
+            style="background:none;border:none;cursor:pointer;color:#94a3b8;"><i class="fas fa-eye"></i></button>
+        </div>
+      </div>
+      <div>
+        <label class="text-sm font-medium text-gray-700 block mb-1">รหัสผ่านใหม่ <span class="text-red-500">*</span></label>
+        <input id="_mpwd_new_inp" type="text" placeholder="กรอกรหัสผ่านใหม่"
+          class="w-full border rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-purple-500 outline-none font-mono">
+      </div>
+      <div id="_mpwd_err" class="hidden text-sm text-red-600 bg-red-50 rounded-lg p-3 text-center"></div>
+    </div>`,
+    `<button onclick="window._mpwdSave('${type}','${key}')" class="flex-1 bg-purple-600 hover:bg-purple-700 text-white py-2.5 rounded-lg text-sm font-bold">
+      <i class="fas fa-save mr-1"></i>บันทึก</button>
+    <button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-4 py-2.5 rounded-lg text-sm font-medium">ยกเลิก</button>`
+  );
+  setTimeout(()=>document.getElementById('_mpwd_new_inp')?.focus(),100);
+};
+
+window._mpwdSave = async function(type, key) {
+  const newPwd = document.getElementById('_mpwd_new_inp')?.value?.trim();
+  const errEl  = document.getElementById('_mpwd_err');
+  if(!newPwd){if(errEl){errEl.textContent='กรุณากรอกรหัสผ่านใหม่';errEl.classList.remove('hidden');}return;}
+  if(newPwd.length<3){if(errEl){errEl.textContent='รหัสผ่านต้องมีอย่างน้อย 3 ตัว';errEl.classList.remove('hidden');}return;}
+  showSync();
+  try {
+    const path = type==='sup' ? `/supervisors/${key}` : `/employees/${key}`;
+    await fbPatch(path, {password:newPwd});
+    if(type==='sup'){const idx=db.supervisors.findIndex(s=>s._key===key);if(idx>=0)db.supervisors[idx].password=newPwd;}
+    else{const idx=db.employees.findIndex(e=>e._key===key);if(idx>=0)db.employees[idx].password=newPwd;}
+    hideSync(); closeModal();
+    // อัพเดต display ถ้า visible
+    const valEl = document.getElementById(`mpwd-${type}-val-${key}`);
+    if(valEl && valEl.textContent!=='••••••') valEl.textContent = newPwd;
+    const row = document.getElementById(`mpwd-${type}-${key}`);
+    if(row){row.style.background='#dcfce7';setTimeout(()=>{row.style.background='';},1500);}
+  } catch(e){
+    hideSync();
+    if(errEl){errEl.textContent='บันทึกไม่สำเร็จ: '+e.message;errEl.classList.remove('hidden');}
+  }
+};
+
 window.filterSupPwd = q => {
   const tbody = document.getElementById('sup-pwd-tbody'); if(!tbody) return;
-  const ql = q.toLowerCase();
-  tbody.innerHTML = db.supervisors.filter(s=>!q||s.name.toLowerCase().includes(ql)||s.username.toLowerCase().includes(ql))
-    .map(s=>`<tr class="hover:bg-gray-50"><td class="px-4 py-2.5 font-medium">${s.name}</td><td class="px-4 py-2.5 font-mono text-blue-700 text-xs">${s.username}</td>
-    <td class="px-4 py-2.5"><button onclick="editSupPwd('${s._key}')" class="text-purple-600 text-sm hover:underline"><i class="fas fa-key mr-1"></i>เปลี่ยนรหัส</button></td></tr>`).join('');
+  const ql=q.toLowerCase();
+  const filtered=db.supervisors.filter(s=>!q||s.name.toLowerCase().includes(ql)||s.username.toLowerCase().includes(ql));
+  tbody.innerHTML=filtered.map(s=>`<tr class="hover:bg-gray-50" id="mpwd-sup-${s._key}">
+    <td class="px-3 py-2.5 font-medium text-sm">${s.name}</td>
+    <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${s.username}</td>
+    <td class="px-3 py-2.5"><div style="display:flex;align-items:center;gap:5px;">
+      <span id="mpwd-sup-val-${s._key}" style="font-family:monospace;font-size:12px;color:#1e293b;min-width:60px;">••••••</span>
+      <button onclick="window._mpwdToggle('sup','${s._key}','${(s.password||'').replace(/'/g,"\\'")}') "style="background:none;border:none;cursor:pointer;color:#94a3b8;font-size:12px;padding:2px;"><i class="fas fa-eye" id="mpwd-sup-eye-${s._key}"></i></button>
+      <button onclick="window._mpwdEdit('sup','${s._key}','${s.name.replace(/'/g,"\\'")}')" style="background:#ede9fe;border:none;cursor:pointer;color:#7c3aed;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;font-family:Sarabun,sans-serif;"><i class="fas fa-edit" style="margin-right:3px;"></i>แก้ไข</button>
+    </div></td></tr>`).join('');
 };
 window.filterEmpPwd = q => {
   const tbody = document.getElementById('emp-pwd-tbody'); if(!tbody) return;
-  const ql = q.toLowerCase();
-  tbody.innerHTML = db.employees.filter(e=>!q||e.name.toLowerCase().includes(ql)||e.username.toLowerCase().includes(ql))
-    .map(e=>`<tr class="hover:bg-gray-50"><td class="px-4 py-2.5 font-medium">${e.name}</td><td class="px-4 py-2.5 font-mono text-blue-700 text-xs">${e.username}</td>
-    <td class="px-4 py-2.5"><button onclick="empPwd('${e._key}')" class="text-purple-600 text-sm hover:underline"><i class="fas fa-key mr-1"></i>เปลี่ยนรหัส</button></td></tr>`).join('');
+  const ql=q.toLowerCase();
+  const filtered=db.employees.filter(e=>!q||e.name.toLowerCase().includes(ql)||e.username.toLowerCase().includes(ql));
+  tbody.innerHTML=filtered.map(e=>`<tr class="hover:bg-gray-50" id="mpwd-emp-${e._key}">
+    <td class="px-3 py-2.5 font-medium text-sm">${e.name}</td>
+    <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${e.username}</td>
+    <td class="px-3 py-2.5"><div style="display:flex;align-items:center;gap:5px;">
+      <span id="mpwd-emp-val-${e._key}" style="font-family:monospace;font-size:12px;color:#1e293b;min-width:60px;">••••••</span>
+      <button onclick="window._mpwdToggle('emp','${e._key}','${(e.password||'').replace(/'/g,"\\'")}') "style="background:none;border:none;cursor:pointer;color:#94a3b8;font-size:12px;padding:2px;"><i class="fas fa-eye" id="mpwd-emp-eye-${e._key}"></i></button>
+      <button onclick="window._mpwdEdit('emp','${e._key}','${e.name.replace(/'/g,"\\'")}')" style="background:#ede9fe;border:none;cursor:pointer;color:#7c3aed;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;font-family:Sarabun,sans-serif;"><i class="fas fa-edit" style="margin-right:3px;"></i>แก้ไข</button>
+    </div></td></tr>`).join('');
 };
-
-// =====================================================================
-//  QR GENERATOR PAGE
 // =====================================================================
 function pgQR(){
   const mc=document.getElementById('main-content');
@@ -3565,15 +4409,24 @@ async function _empAutoCheckIn(token){
     if(btnScan)btnScan.disabled=false;
     return;
   }
+  // ---- เลือกพื้นที่เมื่อมีหลายที่ทับซ้อน ----
+  let _chosenArea = gpsResult.matchedAreas.length === 1 ? gpsResult.matchedAreas[0] : null;
+  if (gpsResult.matchedAreas.length > 1) {
+    if(statusEl) statusEl.style.display='none';
+    const sel = await _showAreaSelectPopup(gpsResult.matchedAreas);
+    if (!sel.confirmed) { if(btnScan)btnScan.disabled=false; return; }
+    _chosenArea = sel.area;
+  } else if (!_chosenArea && gpsLocations.length) {
+    _chosenArea = gpsLocations.reduce((b,l)=>distM(l.lat,l.lng,gpsResult.rawLat,gpsResult.rawLng)<distM(b.lat,b.lng,gpsResult.rawLat,gpsResult.rawLng)?l:b,gpsLocations[0]);
+  }
   const doRecord=async(gpsOk,dist=0)=>{
     const now=new Date(),ts=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
     const ot=0;
     const wage=getEffectiveWage(empObj),otPay=ot*getEffectiveOTRate(empObj);
-    // บันทึก GPS metadata ลง record เพื่อตรวจสอบย้อนหลัง
-    const gpsMeta = { accuracy: gpsResult.accuracy, fakeFlags: gpsResult.fakeFlags?.map(f=>f.code)||[] };
     const rec={empId:empObj._key,empName:empObj.name,dept:empObj.dept,sup:empObj.sup,supId:empObj.supId||tv.sid,
       checkInTime:ts,otHours:ot,wage,otPay,total:wage+otPay,gpsOk,distMeters:Math.round(dist),
       gpsAccuracy:Math.round(gpsResult.accuracy||0), gpsSuspicious: gpsResult.isFakeSuspected||false,
+      locationId:_chosenArea?.id||'', locationName:_chosenArea?.name||'',
       timestamp:Date.now()};
     showSync();
     try{
@@ -3666,17 +4519,42 @@ async function _empAutoCheckOut(token){
     return;
   }
 
-  // GPS ผ่านแล้ว — บันทึก
+  // GPS ผ่านแล้ว — เลือกพื้นที่เมื่อทับซ้อน + ตรวจ cross-location
   const bucket=db.attendance[todayStr]||{};
-  const recKey=Object.entries(bucket).find(([,v])=>v.empId===empObj._key)?.[0];
+  const recEntry=Object.entries(bucket).find(([,v])=>v.empId===empObj._key && v.checkInTime && !v.checkOutTime);
+  const recKey=recEntry?.[0];
   if(!recKey){
     if(statusEl){statusEl.style.background='#fef2f2';statusEl.style.color='#991b1b';statusEl.innerHTML='❌ ไม่พบข้อมูลการเช็คชื่อ';}
+    return;
+  }
+  const checkinRecQR = recEntry[1];
+  let _qrCoArea = gpsResult.matchedAreas.length === 1 ? gpsResult.matchedAreas[0] : null;
+  if (gpsResult.matchedAreas.length > 1) {
+    if(statusEl) statusEl.style.display='none';
+    const sel = await _showAreaSelectPopup(gpsResult.matchedAreas);
+    if (!sel.confirmed) {
+      if(statusEl){statusEl.style.display='block';statusEl.innerHTML='⚠️ ยกเลิกการลงเวลาออก';}
+      if(btnScan)btnScan.disabled=false;
+      return;
+    }
+    _qrCoArea = sel.area;
+  } else if (!_qrCoArea && gpsLocations.length) {
+    _qrCoArea = gpsLocations.reduce((b,l)=>distM(l.lat,l.lng,gpsResult.rawLat,gpsResult.rawLng)<distM(b.lat,b.lng,gpsResult.rawLat,gpsResult.rawLng)?l:b,gpsLocations[0]);
+  }
+  if (checkinRecQR.locationId && _qrCoArea && checkinRecQR.locationId !== _qrCoArea.id) {
+    if(statusEl){statusEl.style.cssText='display:block;margin-top:10px;padding:14px;border-radius:12px;background:#fef2f2;border:2px solid #fecaca;text-align:center;font-size:13px;';
+      statusEl.innerHTML=`🚫 ไม่สามารถออกงานที่นี่ได้<br><span style="font-size:11px;color:#991b1b;">เข้างานที่ <b>${checkinRecQR.locationName||checkinRecQR.locationId}</b> ต้องออกที่เดิม</span>`;}
+    await fbPush('/fraudAlerts',{type:'LOCATION_MISMATCH',empId:empObj._key,empName:empObj.name,
+      checkinLocation:checkinRecQR.locationName||checkinRecQR.locationId,checkoutLocation:_qrCoArea.name||_qrCoArea.id,
+      timestamp:Date.now(),dateStr:todayStr});
+    if(btnScan)btnScan.disabled=false;
     return;
   }
   const now=new Date(),ts=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
   showSync();
   try{
-    await fbPatch(`/attendance/${todayStr}/${recKey}`,{checkOutTime:ts,checkOutGps:true,checkOutDist:Math.round(gpsResult.dist)});
+    await fbPatch(`/attendance/${todayStr}/${recKey}`,{checkOutTime:ts,checkOutGps:true,checkOutDist:Math.round(gpsResult.dist),
+      checkOutLocationId:_qrCoArea?.id||'',checkOutLocationName:_qrCoArea?.name||''});
     db.attendance[todayStr][recKey].checkOutTime=ts;
     db.attendance[todayStr][recKey].checkOutGps=true;
     hideSync();
@@ -4973,12 +5851,28 @@ async function _handleFaceCheckin(descriptor) {
     setTimeout(() => stopFaceCam(), 2500); return;
   }
 
+  // ---- เลือกพื้นที่เมื่อมีหลายที่ทับซ้อน ----
+  let _faceCheckinArea = gpsResult.matchedAreas.length === 1 ? gpsResult.matchedAreas[0] : null;
+  if (gpsResult.matchedAreas.length > 1) {
+    faceDetecting = false;
+    const sel = await _showAreaSelectPopup(gpsResult.matchedAreas);
+    if (!sel.confirmed) {
+      setFaceStatus('info', '⚠️ ยกเลิกการลงเวลา');
+      setTimeout(() => { faceDetecting = true; faceRafHandle = requestAnimationFrame(_faceDetectLoop); }, 2000);
+      return;
+    }
+    _faceCheckinArea = sel.area;
+  } else if (!_faceCheckinArea && gpsLocations.length) {
+    _faceCheckinArea = gpsLocations.reduce((b,l)=>distM(l.lat,l.lng,gpsResult.rawLat,gpsResult.rawLng)<distM(b.lat,b.lng,gpsResult.rawLat,gpsResult.rawLng)?l:b,gpsLocations[0]);
+  }
+
   const now = new Date(), ts = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
   const emp = matched.emp;
   const wage = emp.wage || db.wage.defaultWage;
   const rec = { empId:emp._key, empName:emp.name, dept:emp.dept, sup:emp.sup, supId:emp.supId,
     checkInTime:ts, otHours:0, wage, otPay:0, total:wage,
-    gpsOk:true, distMeters:Math.round(gpsResult.dist), timestamp:Date.now(), checkInMethod:'face' };
+    gpsOk:true, distMeters:Math.round(gpsResult.dist), timestamp:Date.now(), checkInMethod:'face',
+    locationId:_faceCheckinArea?.id||'', locationName:_faceCheckinArea?.name||'' };
   showSync();
   try {
     const res = await fbPush(`/attendance/${todayStr}`, rec);
@@ -5046,21 +5940,47 @@ async function _handleFaceCheckout(descriptor) {
     setTimeout(() => stopFaceCam(), 2500); return;
   }
 
-  const now = new Date(), ts = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  // ---- เลือกพื้นที่เมื่อมีหลายที่ทับซ้อน ----
+  let _faceCoArea = gpsResult.matchedAreas.length === 1 ? gpsResult.matchedAreas[0] : null;
+  if (gpsResult.matchedAreas.length > 1) {
+    faceDetecting = false;
+    const sel = await _showAreaSelectPopup(gpsResult.matchedAreas);
+    if (!sel.confirmed) {
+      setFaceStatus('info', '⚠️ ยกเลิกการลงเวลาออก');
+      setTimeout(() => { faceDetecting = true; faceRafHandle = requestAnimationFrame(_faceDetectLoop); }, 2000);
+      return;
+    }
+    _faceCoArea = sel.area;
+  } else if (!_faceCoArea && gpsLocations.length) {
+    _faceCoArea = gpsLocations.reduce((b,l)=>distM(l.lat,l.lng,gpsResult.rawLat,gpsResult.rawLng)<distM(b.lat,b.lng,gpsResult.rawLat,gpsResult.rawLng)?l:b,gpsLocations[0]);
+  }
+  // ---- ตรวจ cross-location ----
   const bucket = db.attendance[todayStr] || {};
   const recKey = Object.entries(bucket).find(([,v]) => v.empId === matched.emp._key)?.[0];
   if (!recKey) { setFaceStatus('error', '❌ ไม่พบข้อมูลการเช็คชื่อ'); return; }
+  const checkinRec = bucket[recKey];
+  if (checkinRec.locationId && _faceCoArea && checkinRec.locationId !== _faceCoArea.id) {
+    setFaceRing('red');
+    setFaceStatus('error', `🚫 ไม่สามารถออกงานที่นี่ได้<br><span style="font-size:11px;">เข้างานที่ <b>${checkinRec.locationName||checkinRec.locationId}</b> ต้องออกที่เดิม</span>`);
+    await fbPush('/fraudAlerts', { type:'LOCATION_MISMATCH', empId:matched.emp._key, empName:matched.emp.name,
+      checkinLocation:checkinRec.locationName||checkinRec.locationId, checkoutLocation:_faceCoArea.name||_faceCoArea.id,
+      timestamp:Date.now(), dateStr:todayStr });
+    setTimeout(() => stopFaceCam(), 5000); return;
+  }
+
+  const now = new Date(), ts = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
   showSync();
   try {
     await fbPatch(`/attendance/${todayStr}/${recKey}`, {
-      checkOutTime:ts, checkOutGps:true, checkOutDist:Math.round(gpsResult.dist), checkOutMethod:'face'
+      checkOutTime:ts, checkOutGps:true, checkOutDist:Math.round(gpsResult.dist), checkOutMethod:'face',
+      checkOutLocationId:_faceCoArea?.id||'', checkOutLocationName:_faceCoArea?.name||''
     });
     db.attendance[todayStr][recKey].checkOutTime = ts;
     db.attendance[todayStr][recKey].checkOutGps = true;
     hideSync();
     const overlay = document.getElementById('face-scan-overlay');
     if (overlay) overlay.style.display = 'flex';
-    setFaceStatus('success', `✅ ${matched.emp.name} ออกงานสำเร็จ! ${ts} น.<br><span style="font-size:11px;">📍 ${gpsResult.loc} · ห่าง ${Math.round(gpsResult.dist)} ม.</span>`);
+    setFaceStatus('success', `✅ ${matched.emp.name} ออกงานสำเร็จ! ${ts} น.<br><span style="font-size:11px;">📍 ${_faceCoArea?.name||gpsResult.loc} · ห่าง ${Math.round(gpsResult.dist)} ม.</span>`);
     refreshAttendList();
     const empObj = db.employees.find(e => e._key === matched.emp._key);
     const updatedRec = { ...db.attendance[todayStr][recKey] };
@@ -5209,6 +6129,7 @@ async function _getGpsResult() {
     isHardBlock,
     rawLat:       lat,
     rawLng:       lng,
+    matchedAreas: g.matchedAreas || [],  // พื้นที่ที่ทับซ้อน
   };
 }
 
@@ -5247,16 +6168,114 @@ function _showGpsBlockUI(empName, gpsResult, action) {
 }
 function gpsInAny(lat, lng) {
   if (!gpsLocations.length) {
-    // fallback to legacy single location
     const d = distM(hrGPS.lat, hrGPS.lng, lat, lng);
-    return { ok: d <= (hrGPS.radius||100), dist: d, loc: hrGPS.name||'สถานที่หลัก' };
+    return { ok: d <= (hrGPS.radius||100), dist: d, loc: hrGPS.name||'สถานที่หลัก', matchedAreas: [] };
   }
   let bestDist = Infinity, bestLoc = null;
+  const matchedAreas = [];
   for (const loc of gpsLocations) {
     const d = distM(loc.lat, loc.lng, lat, lng);
     if (d < bestDist) { bestDist = d; bestLoc = loc; }
+    if (d <= (loc.radius||100)) matchedAreas.push({ ...loc, dist: Math.round(d) });
   }
-  return { ok: bestDist <= (bestLoc.radius||100), dist: Math.round(bestDist), loc: bestLoc?.name||'' };
+  return {
+    ok: bestDist <= (bestLoc.radius||100),
+    dist: Math.round(bestDist),
+    loc: bestLoc?.name||'',
+    matchedAreas
+  };
+}
+
+// =====================================================================
+//  AREA SELECTION POPUP
+//  แสดง popup ให้เลือกพื้นที่เมื่ออยู่ในรัศมีหลายพื้นที่พร้อมกัน
+//  คืนค่า { confirmed: true, area: {...} } หรือ { confirmed: false }
+// =====================================================================
+function _showAreaSelectPopup(matchedAreas) {
+  return new Promise(resolve => {
+    const areaColors = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899'];
+    let selectedIdx = 0;
+
+    const renderCards = () => matchedAreas.map((a, i) => {
+      const col = areaColors[i % areaColors.length];
+      const isSel = i === selectedIdx;
+      return `<div onclick="window._areaPopupSel(${i})"
+        style="border:2.5px solid ${isSel ? col : '#e2e8f0'};border-radius:14px;padding:14px 16px;margin-bottom:10px;cursor:pointer;
+          background:${isSel ? `${col}12` : '#fff'};transition:all .15s;display:flex;align-items:center;gap:14px;"
+        onmouseover="this.style.borderColor='${col}'" onmouseout="this.style.borderColor='${isSel ? col : '#e2e8f0'}'">
+        <div style="width:38px;height:38px;border-radius:50%;background:${col};display:flex;align-items:center;justify-content:center;
+          color:#fff;font-size:16px;font-weight:700;flex-shrink:0;">${i+1}</div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:700;font-size:14px;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${a.name||'พื้นที่ '+(i+1)}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px;">ห่าง <b style="color:${col};">${a.dist} ม.</b> · รัศมี ${a.radius||100} ม.</div>
+        </div>
+        <div style="width:22px;height:22px;border-radius:50%;border:2.5px solid ${col};display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+          ${isSel ? `<div style="width:12px;height:12px;border-radius:50%;background:${col};"></div>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+
+    // inject modal
+    let wrap = document.getElementById('_area-select-modal');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.id = '_area-select-modal';
+      document.body.appendChild(wrap);
+    }
+    wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:19999;display:flex;align-items:center;justify-content:center;padding:16px;';
+    wrap.innerHTML = `
+      <div id="_area-select-box" style="background:#fff;border-radius:20px;padding:22px 20px;width:100%;max-width:400px;
+        box-shadow:0 20px 60px rgba(0,0,0,.25);animation:fadeIn .2s;">
+        <div style="text-align:center;margin-bottom:16px;">
+          <div style="font-size:26px;margin-bottom:6px;">📍</div>
+          <div style="font-size:16px;font-weight:700;color:#1e293b;">พบ ${matchedAreas.length} พื้นที่ทับซ้อน</div>
+          <div style="font-size:12px;color:#64748b;margin-top:4px;">กรุณาเลือกพื้นที่ที่ต้องการลงเวลา</div>
+        </div>
+        <div id="_area-select-cards">${renderCards()}</div>
+        <div style="display:flex;gap:10px;margin-top:16px;">
+          <button onclick="window._areaPopupCancel()"
+            style="flex:1;padding:13px;border-radius:12px;border:1.5px solid #e2e8f0;background:#f8fafc;
+              font-size:14px;font-weight:600;color:#64748b;cursor:pointer;font-family:Sarabun,sans-serif;">
+            ยกเลิก
+          </button>
+          <button id="_area-select-confirm-btn" onclick="window._areaPopupConfirm()"
+            style="flex:2;padding:13px;border-radius:12px;border:none;background:#3b82f6;
+              font-size:14px;font-weight:700;color:#fff;cursor:pointer;font-family:Sarabun,sans-serif;">
+            ✓ ยืนยันพื้นที่นี้
+          </button>
+        </div>
+      </div>`;
+
+    window._areaPopupSel = (i) => {
+      selectedIdx = i;
+      document.getElementById('_area-select-cards').innerHTML = renderCards();
+      const col = areaColors[i % areaColors.length];
+      const btn = document.getElementById('_area-select-confirm-btn');
+      if (btn) btn.style.background = col;
+    };
+    window._areaPopupConfirm = () => {
+      wrap.remove();
+      resolve({ confirmed: true, area: matchedAreas[selectedIdx] });
+    };
+    window._areaPopupCancel = () => {
+      wrap.remove();
+      resolve({ confirmed: false, area: null });
+    };
+  });
+}
+
+// ตรวจว่าพนักงาน check-in ที่ locationId ไหน — ป้องกันออกงานต่างที่
+function _getCheckinLocationId(empId) {
+  const bucket = db.attendance[todayStr] || {};
+  const rec = Object.values(bucket).find(r => r.empId === empId && r.checkInTime && !r.checkOutTime);
+  return rec ? (rec.locationId || null) : null;
+}
+
+// ตรวจว่า checkout location ตรงกับ checkin location ไหม
+function _isCheckoutLocationMatch(empId, checkoutLocationId) {
+  const checkinLocId = _getCheckinLocationId(empId);
+  if (!checkinLocId || !checkoutLocationId) return true; // ไม่มีข้อมูล = ผ่าน (legacy)
+  return checkinLocId === checkoutLocationId;
 }
 
 // ---- Rebuild FaceMatcher from all registered employees ----
@@ -6293,12 +7312,26 @@ window.doGpsButtonCheckin = async function() {
     if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
     return;
   }
+  // ---- เลือกพื้นที่เมื่อมีหลายที่ทับซ้อน ----
+  let chosenArea = gpsResult.matchedAreas.length === 1 ? gpsResult.matchedAreas[0] : null;
+  if (gpsResult.matchedAreas.length > 1) {
+    if (statusEl) statusEl.style.display = 'none';
+    const sel = await _showAreaSelectPopup(gpsResult.matchedAreas);
+    if (!sel.confirmed) {
+      if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+      return;
+    }
+    chosenArea = sel.area;
+  } else if (!chosenArea && gpsLocations.length) {
+    chosenArea = gpsLocations.reduce((b,l) => distM(l.lat,l.lng,gpsResult.rawLat,gpsResult.rawLng) < distM(b.lat,b.lng,gpsResult.rawLat,gpsResult.rawLng) ? l : b, gpsLocations[0]);
+  }
   // GPS OK → บันทึก
   const now = new Date(), ts = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
   const wage = getEffectiveWage(empObj);
   const rec = { empId:empObj._key, empName:empObj.name, dept:empObj.dept, sup:empObj.sup, supId:empObj.supId||'',
     checkInTime:ts, otHours:0, wage, otPay:0, total:wage, gpsOk:true, distMeters:Math.round(gpsResult.dist),
-    checkinMethod:'gps_button', deviceId:getDeviceId(), timestamp:Date.now() };
+    checkinMethod:'gps_button', deviceId:getDeviceId(), timestamp:Date.now(),
+    locationId: chosenArea?.id||'', locationName: chosenArea?.name||'' };
   showSync();
   try {
     const res = await fbPush('/attendance/' + todayStr, rec);
@@ -6350,12 +7383,38 @@ window.doGpsButtonCheckout = async function() {
   }
   await loadAttendanceDate(todayStr);
   const bucket = db.attendance[todayStr]||{};
-  const recKey = Object.entries(bucket).find(([,v])=>v.empId===empObj._key)?.[0];
+  const recEntry = Object.entries(bucket).find(([,v])=>v.empId===empObj._key && v.checkInTime && !v.checkOutTime);
+  const recKey = recEntry?.[0];
   if (!recKey) { if (statusEl) { statusEl.style.background='#fef9c3'; statusEl.style.color='#854d0e'; statusEl.innerHTML='⚠️ ไม่พบข้อมูลการเช็คชื่อวันนี้'; } return; }
+  const checkinRec = recEntry[1];
+  // ---- ตรวจ cross-location fraud ----
+  // เมื่อมีพื้นที่ทับซ้อน ให้เลือกพื้นที่ก่อนออก และเปรียบเทียบกับที่เข้างาน
+  let chosenOutArea = gpsResult.matchedAreas.length === 1 ? gpsResult.matchedAreas[0] : null;
+  if (gpsResult.matchedAreas.length > 1) {
+    if (statusEl) statusEl.style.display = 'none';
+    const sel = await _showAreaSelectPopup(gpsResult.matchedAreas);
+    if (!sel.confirmed) {
+      if (btn) { btn.disabled=false; btn.style.opacity='1'; }
+      return;
+    }
+    chosenOutArea = sel.area;
+  }
+  // ตรวจว่าออกงานตรงกับที่เข้างานไหม
+  if (checkinRec.locationId && chosenOutArea && checkinRec.locationId !== chosenOutArea.id) {
+    const ciName = checkinRec.locationName || checkinRec.locationId;
+    const coName = chosenOutArea.name || chosenOutArea.id;
+    if (statusEl) { statusEl.style.cssText='display:block;margin-top:10px;padding:14px;border-radius:12px;background:#fef2f2;border:2px solid #fecaca;font-size:13px;font-weight:600;text-align:center;';
+      statusEl.innerHTML=`🚫 ไม่สามารถออกงานที่นี่ได้<br><span style="font-size:11px;font-weight:400;color:#991b1b;">เข้างานที่ <b>${ciName}</b> ต้องออกที่เดิม</span>`; }
+    await fbPush('/fraudAlerts', { type:'LOCATION_MISMATCH', empId:empObj._key, empName:empObj.name,
+      checkinLocation:ciName, checkoutLocation:coName, timestamp:Date.now(), dateStr:todayStr });
+    if (btn) { btn.disabled=false; btn.style.opacity='1'; }
+    return;
+  }
   const now = new Date(), ts = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
   showSync();
   try {
-    await fbPatch('/attendance/'+todayStr+'/'+recKey, { checkOutTime:ts, checkOutGps:true, checkOutDist:Math.round(gpsResult.dist), checkOutMethod:'gps_button' });
+    await fbPatch('/attendance/'+todayStr+'/'+recKey, { checkOutTime:ts, checkOutGps:true, checkOutDist:Math.round(gpsResult.dist), checkOutMethod:'gps_button',
+      checkOutLocationId: chosenOutArea?.id||'', checkOutLocationName: chosenOutArea?.name||'' });
     db.attendance[todayStr][recKey].checkOutTime = ts;
     db.attendance[todayStr][recKey].checkOutGps = true;
     hideSync();
@@ -6532,6 +7591,11 @@ async function pgFraudAlerts() {
           if (a.type === 'DEVICE_CONFLICT') {
             flags = `<span class="inline-block px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-700 mr-1 mb-1"><i class="fas fa-mobile-alt mr-1"></i>ใช้เครื่องเดียวกันหลายบัญชี</span>
               ${a.conflictName?`<span class="inline-block px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 mr-1 mb-1">กับ: ${a.conflictName} (${a.conflictRole||''})</span>`:''}`;
+          } else if (a.type === 'SUP_OUT_OF_AREA' || a.type === 'EMP_OUT_OF_AREA') {
+            const roleLabel = a.type==='SUP_OUT_OF_AREA' ? 'หัวหน้างาน' : 'พนักงาน';
+            flags = `<span class="inline-block px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700 mr-1 mb-1"><i class="fas fa-map-marker-alt mr-1"></i>${roleLabel}ออกนอกพื้นที่</span>
+              ${a.dist?`<span class="inline-block px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700 mr-1 mb-1">ห่าง ${Math.round(a.dist)}ม.</span>`:''}
+              ${a.rawLat?`<a href="https://www.google.com/maps?q=${a.rawLat},${a.rawLng}" target="_blank" class="inline-block px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700 mr-1 mb-1"><i class="fas fa-map mr-1"></i>ดูแผนที่</a>`:''}`;
           } else {
             flags = (a.flags||[]).map(f => {
               const info = flagLabels[f] || {label:f, color:'bg-gray-100 text-gray-700'};
@@ -7079,6 +8143,194 @@ window.myHist = async function(month) {
     </div>`}
   `;
 };
+
+// =====================================================================
+//  ORG CHART — การ์ดสรุปพนักงานตามหัวหน้างาน
+// =====================================================================
+function pgOrgChart() {
+  const mc = document.getElementById('main-content');
+  mc.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+      <h3 style="font-size:16px;font-weight:700;color:#1e293b;border-left:4px solid #6366f1;padding-left:12px;margin:0;">
+        <i class="fas fa-project-diagram" style="color:#6366f1;margin-right:8px;"></i>การ์ดสรุปพนักงานตามหัวหน้า
+      </h3>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:12px;color:#64748b;font-weight:600;">เรียงตาม:</label>
+        <select id="org-sort" onchange="renderOrgChart()"
+          style="border:1.5px solid #e2e8f0;border-radius:10px;padding:6px 12px;font-size:13px;background:#fff;font-family:Sarabun,sans-serif;cursor:pointer;">
+          <option value="wage-desc">ค่าแรงเฉลี่ย สูง→ต่ำ</option>
+          <option value="wage-asc">ค่าแรงเฉลี่ย ต่ำ→สูง</option>
+          <option value="name-asc">ชื่อ ก→ฮ</option>
+          <option value="count-desc">จำนวนลูกน้อง มาก→น้อย</option>
+        </select>
+        <input id="org-search" type="text" placeholder="ค้นหาชื่อ..."
+          oninput="renderOrgChart()"
+          style="border:1.5px solid #e2e8f0;border-radius:10px;padding:6px 12px;font-size:13px;
+            background:#fff;font-family:Sarabun,sans-serif;width:140px;outline:none;">
+      </div>
+    </div>
+    <!-- Summary bar -->
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+      <div style="background:#eff6ff;border-radius:12px;padding:10px 18px;font-size:13px;color:#1d4ed8;font-weight:700;">
+        <i class="fas fa-user-tie mr-2"></i>${db.supervisors.length} หัวหน้างาน
+      </div>
+      <div style="background:#f0fdf4;border-radius:12px;padding:10px 18px;font-size:13px;color:#15803d;font-weight:700;">
+        <i class="fas fa-users mr-2"></i>${db.employees.length} พนักงานทั้งหมด
+      </div>
+      <div style="background:#fef9c3;border-radius:12px;padding:10px 18px;font-size:13px;color:#92400e;font-weight:700;">
+        <i class="fas fa-coins mr-2"></i>ค่าแรงเฉลี่ย ฿${db.employees.length?Math.round(db.employees.reduce((t,e)=>{const ds=db.wage?.deptSettings?.[e.dept];const w=(!ds||ds.mode!=='individual')?(ds?.jobRate||e.wage||db.wage?.defaultWage||0):(e.wage||db.wage?.defaultWage||0);return t+w;},0)/db.employees.length).toLocaleString():0}/วัน
+      </div>
+    </div>
+    <div id="org-cards-wrap" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;"></div>`;
+  renderOrgChart();
+}
+
+window.renderOrgChart = function() {
+  const wrap = document.getElementById('org-cards-wrap'); if (!wrap) return;
+  const sort   = document.getElementById('org-sort')?.value || 'wage-desc';
+  const q      = (document.getElementById('org-search')?.value || '').toLowerCase();
+
+  const getEmpWage = e => {
+    const ds = db.wage?.deptSettings?.[e.dept];
+    return (!ds || ds.mode !== 'individual') ? (ds?.jobRate || e.wage || db.wage?.defaultWage || 0) : (e.wage || db.wage?.defaultWage || 0);
+  };
+
+  const supColors = [
+    '#6366f1','#0891b2','#059669','#d97706','#dc2626','#7c3aed','#db2777','#0f766e',
+  ];
+
+  let sups = [...db.supervisors];
+  if (q) sups = sups.filter(s =>
+    s.name.toLowerCase().includes(q) ||
+    db.employees.some(e => e.supId === s._key && e.name.toLowerCase().includes(q))
+  );
+
+  const supEmps = s => db.employees.filter(e => e.supId === s._key);
+  const avgWage = s => { const es = supEmps(s); return es.length ? es.reduce((t,e)=>t+getEmpWage(e),0)/es.length : 0; };
+
+  if (sort === 'wage-desc')   sups.sort((a,b) => avgWage(b)-avgWage(a));
+  else if (sort === 'wage-asc')    sups.sort((a,b) => avgWage(a)-avgWage(b));
+  else if (sort === 'name-asc')    sups.sort((a,b) => a.name.localeCompare(b.name,'th'));
+  else if (sort === 'count-desc')  sups.sort((a,b) => supEmps(b).length-supEmps(a).length);
+
+  if (!sups.length) {
+    wrap.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:60px;color:#94a3b8;">
+      <i class="fas fa-users-slash" style="font-size:40px;display:block;margin-bottom:12px;opacity:.4;"></i>ไม่พบข้อมูล</div>`;
+    return;
+  }
+
+  wrap.innerHTML = sups.map((s, si) => {
+    const col  = supColors[si % supColors.length];
+    const emps = supEmps(s).sort((a,b)=>getEmpWage(b)-getEmpWage(a));
+    const avg  = emps.length ? Math.round(emps.reduce((t,e)=>t+getEmpWage(e),0)/emps.length) : 0;
+    const total= emps.reduce((t,e)=>t+getEmpWage(e),0);
+
+    // Wage tier pills
+    const maxW = emps.length ? Math.max(...emps.map(e=>getEmpWage(e))) : 0;
+    const minW = emps.length ? Math.min(...emps.map(e=>getEmpWage(e))) : 0;
+
+    const empPills = emps.slice(0,5).map(e => {
+      const w = getEmpWage(e);
+      const pct = maxW > minW ? Math.round((w-minW)/(maxW-minW)*100) : 100;
+      const wCol = pct>=70?'#16a34a':pct>=40?'#d97706':'#94a3b8';
+      return `<span style="display:inline-flex;align-items:center;gap:4px;background:#f8fafc;border:1px solid #e2e8f0;
+        border-radius:20px;padding:3px 10px;font-size:11px;color:#1e293b;margin:2px;">
+        <span style="width:7px;height:7px;border-radius:50%;background:${wCol};flex-shrink:0;"></span>
+        ${e.name}
+        <span style="color:${wCol};font-weight:700;">฿${w.toLocaleString()}</span>
+      </span>`;
+    }).join('');
+    const moreCount = emps.length - 5;
+
+    return `
+    <div id="org-card-${s._key}"
+      style="background:#fff;border-radius:18px;box-shadow:0 2px 12px rgba(0,0,0,.08);
+        overflow:hidden;border:2px solid #f1f5f9;transition:all .2s;cursor:pointer;"
+      onmouseover="this.style.boxShadow='0 8px 28px rgba(0,0,0,.14)';this.style.transform='translateY(-2px)'"
+      onmouseout="this.style.boxShadow='0 2px 12px rgba(0,0,0,.08)';this.style.transform='translateY(0)'">
+
+      <!-- Header -->
+      <div style="background:${col};padding:18px 20px;display:flex;align-items:center;gap:14px;"
+        onclick="window._orgToggleCard('${s._key}')">
+        <div style="width:46px;height:46px;border-radius:50%;background:rgba(255,255,255,.2);
+          display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;border:2px solid rgba(255,255,255,.4);">👔</div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:15px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${s.name}</div>
+          <div style="font-size:11px;color:rgba(255,255,255,.8);margin-top:2px;">${s.dept||'ไม่ระบุสายงาน'}</div>
+        </div>
+        <i class="fas fa-chevron-down" id="org-chevron-${s._key}"
+          style="color:rgba(255,255,255,.8);font-size:14px;transition:transform .3s;flex-shrink:0;"></i>
+      </div>
+
+      <!-- Stats row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;border-bottom:1px solid #f1f5f9;">
+        <div style="padding:12px 14px;text-align:center;border-right:1px solid #f1f5f9;">
+          <div style="font-size:20px;font-weight:800;color:${col};">${emps.length}</div>
+          <div style="font-size:10px;color:#94a3b8;margin-top:2px;">พนักงาน</div>
+        </div>
+        <div style="padding:12px 14px;text-align:center;border-right:1px solid #f1f5f9;">
+          <div style="font-size:15px;font-weight:800;color:#16a34a;">฿${avg.toLocaleString()}</div>
+          <div style="font-size:10px;color:#94a3b8;margin-top:2px;">เฉลี่ย/วัน</div>
+        </div>
+        <div style="padding:12px 14px;text-align:center;">
+          <div style="font-size:15px;font-weight:800;color:#1d4ed8;">฿${total.toLocaleString()}</div>
+          <div style="font-size:10px;color:#94a3b8;margin-top:2px;">รวม/วัน</div>
+        </div>
+      </div>
+
+      <!-- Preview pills (always visible) -->
+      <div style="padding:12px 16px;border-bottom:1px solid #f1f5f9;">
+        ${emps.length
+          ? empPills + (moreCount>0?`<span style="font-size:11px;color:#94a3b8;margin:2px 4px;">+${moreCount} คน</span>`:'')
+          : '<span style="font-size:12px;color:#94a3b8;font-style:italic;">ยังไม่มีพนักงาน</span>'}
+      </div>
+
+      <!-- Expandable employee list -->
+      <div id="org-expand-${s._key}" style="display:none;max-height:360px;overflow-y:auto;">
+        <div style="padding:12px 16px 6px;font-size:11px;font-weight:700;color:#94a3b8;letter-spacing:.5px;">
+          รายชื่อพนักงานทั้งหมด (เรียงตามค่าแรง)
+        </div>
+        ${emps.map((e,i) => {
+          const w = getEmpWage(e);
+          const bar = maxW>minW ? Math.max(8,Math.round((w-minW)/(maxW-minW)*100)) : 100;
+          const wCol2 = bar>=70?'#16a34a':bar>=40?'#d97706':'#94a3b8';
+          return `
+          <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;
+            border-top:1px solid #f8fafc;transition:background .1s;"
+            onmouseover="this.style.background='#f8fafc'"
+            onmouseout="this.style.background='transparent'">
+            <div style="width:26px;height:26px;border-radius:50%;background:${col};display:flex;align-items:center;
+              justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0;">${i+1}</div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${e.name}</div>
+              <div style="font-size:10px;color:#94a3b8;">${e.dept||'-'}</div>
+              <div style="height:3px;background:#f1f5f9;border-radius:3px;margin-top:4px;">
+                <div style="height:3px;background:${wCol2};border-radius:3px;width:${bar}%;"></div>
+              </div>
+            </div>
+            <div style="text-align:right;flex-shrink:0;">
+              <div style="font-size:14px;font-weight:700;color:${wCol2};">฿${w.toLocaleString()}</div>
+              <div style="font-size:10px;color:#94a3b8;">/วัน</div>
+            </div>
+          </div>`;
+        }).join('')}
+        ${!emps.length?`<div style="text-align:center;padding:20px;color:#94a3b8;font-size:13px;">ไม่มีพนักงาน</div>`:''}
+      </div>
+    </div>`;
+  }).join('');
+};
+
+window._orgToggleCard = function(supKey) {
+  const panel   = document.getElementById('org-expand-'+supKey);
+  const chevron = document.getElementById('org-chevron-'+supKey);
+  const card    = document.getElementById('org-card-'+supKey);
+  if (!panel) return;
+  const isOpen = panel.style.display !== 'none';
+  panel.style.display   = isOpen ? 'none' : 'block';
+  if (chevron) chevron.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(180deg)';
+  if (card)    card.style.borderColor  = isOpen ? '#f1f5f9' : (document.getElementById('org-sort') ? '#6366f1' : '#6366f1');
+};
+
 
 // =====================================================================
 window.onload=()=>{
