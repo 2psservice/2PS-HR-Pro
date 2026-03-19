@@ -699,6 +699,8 @@ async function doLogin() {
       faceMatcherDirty = true;
       await loadAttendanceDate(todayStr);
       startApp();
+      // Auto-heal: fix employees ที่มี sup name แต่ supId ว่าง (admin เท่านั้น)
+      if (CU.role === 'admin') setTimeout(healEmployeeSupIds, 1500);
       // เริ่ม GPS tracking สำหรับทั้งพนักงานและหัวหน้างาน (ทันทีหลัง login)
       if (CU.role === 'employee' || CU.role === 'supervisor') setTimeout(startLiveGpsTracking, 2000);
       // Admin: เริ่ม SSE realtime listener สำหรับ liveTrack
@@ -987,6 +989,18 @@ async function renderDashBody(dateKey){
   const absent=totalEmp-present;
   const tWage=records.reduce((s,r)=>s+r.total,0);
 
+  // ---- ดึง fraud alerts ออกนอกพื้นที่วันนี้ ----
+  let outAlerts = [];
+  try {
+    const allAlerts = await fbGet('/fraudAlerts');
+    if (allAlerts) {
+      outAlerts = Object.values(allAlerts).filter(a =>
+        (a.type==='SUP_OUT_OF_AREA'||a.type==='EMP_OUT_OF_AREA') &&
+        a.dateStr === dateKey
+      ).sort((a,b)=>b.timestamp-a.timestamp);
+    }
+  } catch(_) {}
+
   // ---- หัวหน้างาน attendance ----
   const supRecords = records.filter(r => db.supervisors.some(s => s._key === r.empId));
   const totalSup = db.supervisors.length;
@@ -1022,6 +1036,41 @@ async function renderDashBody(dateKey){
   const lateCount = lateList.length;
 
   let html=`
+  <!-- === แจ้งเตือนออกนอกพื้นที่ === -->
+  ${outAlerts.length>0?`
+  <div style="background:#fef2f2;border:2px solid #fca5a5;border-radius:14px;padding:14px 18px;margin-bottom:16px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px;">
+      <div style="font-size:13px;font-weight:700;color:#dc2626;display:flex;align-items:center;gap:7px;">
+        <span style="background:#dc2626;color:#fff;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;">!</span>
+        🚨 แจ้งเตือนออกนอกพื้นที่ (${outAlerts.length} ครั้ง)
+      </div>
+      <a href="#" onclick="goTab('live-track',document.querySelector('[data-tab=\\"live-track\\"]'))"
+        style="font-size:11px;color:#3b82f6;text-decoration:underline;">ดู Live GPS →</a>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;max-height:180px;overflow-y:auto;">
+      ${outAlerts.slice(0,8).map(a=>{
+        const t=new Date(a.timestamp).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+        const isSup=a.type==='SUP_OUT_OF_AREA';
+        return `<div style="background:#fff;border:1px solid #fecaca;border-radius:10px;padding:9px 12px;
+          display:flex;align-items:center;gap:10px;">
+          <div style="background:#fee2e2;border-radius:50%;width:32px;height:32px;display:flex;
+            align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">${isSup?'👔':'🧑'}</div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;font-weight:700;color:#991b1b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${a.empName}</div>
+            <div style="font-size:11px;color:#94a3b8;">${isSup?'หัวหน้างาน':'พนักงาน'} · ${a.dept||'-'}</div>
+          </div>
+          <div style="text-align:right;flex-shrink:0;">
+            <div style="font-size:11px;font-weight:700;color:#dc2626;">🚨 นอกพื้นที่</div>
+            <div style="font-size:10px;color:#94a3b8;">${t} น.</div>
+            ${a.dist?`<div style="font-size:10px;color:#dc2626;">ห่าง ${Math.round(a.dist)} ม.</div>`:''}
+          </div>
+        </div>`;
+      }).join('')}
+      ${outAlerts.length>8?`<div style="text-align:center;font-size:11px;color:#94a3b8;padding:4px;">... และอีก ${outAlerts.length-8} รายการ</div>`:''}
+    </div>
+  </div>
+  `:''}
+
   <!-- === หัวหน้างาน === -->
   <div style="background:#faf5ff;border:1px solid #e9d5ff;border-radius:14px;padding:16px 18px;margin-bottom:16px;">
     <div style="font-size:12px;font-weight:700;color:#7c3aed;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
@@ -1460,6 +1509,12 @@ async function _sendLiveGps() {
     // อัพเดท supGpsTrack ด้วยเพื่อ backward compat กับหน้าแผนที่หัวหน้า
     if (CU.role === 'supervisor') {
       await fbSet('/supGpsTrack/' + CU.id, payload);
+      // บันทึก History สำหรับ Timeline (ทุก supervisor + employee)
+      await fbPush('/liveTrackHistory/' + CU.id, payload);
+    }
+    // บันทึก history สำหรับพนักงานด้วย
+    if (CU.role === 'employee') {
+      await fbPush('/liveTrackHistory/' + CU.id, payload);
     }
 
     // แจ้งเตือนถ้าออกนอกพื้นที่ (throttle)
@@ -2071,47 +2126,76 @@ window.toggleLiveAuto = function() {};  // legacy — SSE handles this now
 
 function pgSups(){
   const mc=document.getElementById('main-content');
-  // Preload GPS cache
-  if (!window._supGpsCache) window._supGpsCache = {};
-  fbGet('/supGpsTrack').then(d => {
-    if (d) { Object.entries(d).forEach(([k,v]) => { window._supGpsCache[k] = v; }); if(window._currentTab==='sups') pgSups(); }
-  });
-  mc.innerHTML=card(sHead('รายชื่อหัวหน้างาน',Btn('<i class="fas fa-plus mr-1"></i>เพิ่มหัวหน้างาน','addSup()'))
-    +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','สายงาน','Username','รหัสผ่าน','ลูกน้อง','เช็คพิกัด','จัดการ')}
-    <tbody>${db.supervisors.length===0?EmptyR(8):db.supervisors.map(s=>{
-      const subs=db.employees.filter(e=>e.supId===s._key).length;
-      const lastGps = (window._supGpsCache||{})[s._key];
-      const gpsAge = lastGps ? Math.round((Date.now()-lastGps.ts)/60000) : null;
-      const gpsLabel = gpsAge===null ? '<span style="color:#94a3b8;font-size:11px;">ยังไม่มีข้อมูล</span>'
-        : gpsAge < 50 ? `<span style="color:#16a34a;font-size:11px;"><i class="fas fa-circle" style="font-size:7px;margin-right:3px;animation:pulse 2s infinite;"></i>${gpsAge}น.ที่แล้ว</span>`
-        : `<span style="color:#f59e0b;font-size:11px;">${gpsAge}น.ที่แล้ว</span>`;
-      return`<tr class="hover:bg-gray-50" id="sup-row-${s._key}">
-        <td class="px-4 py-3 font-mono text-gray-400 text-xs">${s._key}</td>
-        <td class="px-4 py-3 font-medium">${s.name}</td>
-        <td class="px-4 py-3">${s.dept||'-'}</td>
-        <td class="px-4 py-3 font-mono text-blue-700">${s.username}</td>
-        <td class="px-4 py-3">
-          <div style="display:flex;align-items:center;gap:6px;">
-            <span id="sup-pwd-text-${s._key}" style="font-family:monospace;font-size:12px;color:#1e293b;">••••••</span>
-            <button onclick="toggleSupPwdView('${s._key}','${(s.password||'').replace(/'/g,"\\'")}')" style="background:none;border:none;cursor:pointer;color:#94a3b8;padding:2px 4px;font-size:12px;"><i class="fas fa-eye" id="sup-pwd-eye-${s._key}"></i></button>
-            <button onclick="adminEditSupPwd('${s._key}','${s.name.replace(/'/g,"\\'")}')" style="background:#f1f5f9;border:1px solid #e2e8f0;cursor:pointer;color:#475569;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;"><i class="fas fa-key" style="margin-right:3px;"></i>เปลี่ยน</button>
-          </div>
-        </td>
-        <td class="px-4 py-3">${bdg('blue',subs+' คน')}</td>
-        <td class="px-4 py-3">
-          <div style="display:flex;align-items:center;gap:6px;">
-            ${gpsLabel}
-            <button onclick="openSupGpsMap('${s._key}','${s.name.replace(/'/g,"\\'")}')"
-              style="background:#0f172a;color:#38bdf8;border:none;border-radius:8px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:4px;white-space:nowrap;">
-              <i class="fas fa-map-marker-alt"></i> แผนที่
-            </button>
-          </div>
-        </td>
-        <td class="px-4 py-3 flex gap-3">
-          <button onclick="delSup('${s._key}')" class="text-red-500 text-sm hover:underline">ลบ</button>
-        </td></tr>`;
-    }).join('')}</tbody></table></div>`);
+  mc.innerHTML=card(sHead('รายชื่อหัวหน้างาน',`<div class="flex gap-2 flex-wrap">
+    <input type="text" id="ssrch" placeholder="ค้นหา..." class="border rounded-lg px-3 py-2 text-sm w-36 focus:outline-none focus:ring-1" oninput="filterSups(this.value)">
+    ${Btn('<i class="fas fa-plus mr-1"></i>เพิ่มหัวหน้างาน','addSup()')}</div>`)
+    +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','สายงาน','Username','รหัสผ่าน','ลูกน้อง','จัดการ')}
+    <tbody id="sup-tbody">${supRows(db.supervisors)}</tbody></table></div>`);
 }
+
+function supRows(sups){
+  return sups.length===0?EmptyR(7):sups.map(s=>{
+    const subs=db.employees.filter(e=>empBelongsToSup(e,s._key)).length;
+    const safePwd=(s.password||'').replace(/"/g,'&quot;');
+    return`<tr class="hover:bg-gray-50" id="sup-row-${s._key}">
+      <td class="px-4 py-3 font-mono text-gray-400 text-xs">${s._key}</td>
+      <td class="px-4 py-3 font-medium">${s.name}</td>
+      <td class="px-4 py-3">${s.dept||'-'}</td>
+      <td class="px-4 py-3 font-mono text-blue-700">${s.username}</td>
+      <td class="px-4 py-3" style="min-width:185px;">
+        <div style="display:flex;align-items:center;gap:5px;">
+          <input id="sup-pwd-inp-${s._key}" type="text" value="${safePwd}"
+            style="width:120px;border:1.5px solid #e2e8f0;border-radius:8px;padding:4px 8px;
+              font-family:monospace;font-size:12px;color:#1e293b;outline:none;background:#f8fafc;transition:all .15s;"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();window.saveSupPwdInline('${s._key}',this.value);}"
+            onfocus="this.style.borderColor='#6366f1';this.style.background='#fff';"
+            onblur="this.style.borderColor='#e2e8f0';this.style.background='#f8fafc';">
+          <button onclick="window.saveSupPwdInline('${s._key}',document.getElementById('sup-pwd-inp-${s._key}').value)"
+            title="บันทึก"
+            style="background:#6366f1;color:#fff;border:none;border-radius:8px;padding:5px 9px;
+              font-size:14px;cursor:pointer;flex-shrink:0;"
+            onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">💾</button>
+        </div>
+      </td>
+      <td class="px-4 py-3">${bdg('blue',subs+' คน')}</td>
+      <td class="px-4 py-3 flex gap-3">
+        <button onclick="delSup('${s._key}')" class="text-red-500 text-sm hover:underline">ลบ</button>
+      </td></tr>`;
+  }).join('');
+}
+
+window.filterSups = q => {
+  const tbody = document.getElementById('sup-tbody'); if(!tbody) return;
+  const ql = q.toLowerCase();
+  const filtered = db.supervisors.filter(s =>
+    !q || s.name.toLowerCase().includes(ql) ||
+    (s.username||'').toLowerCase().includes(ql) ||
+    (s.dept||'').toLowerCase().includes(ql)
+  );
+  tbody.innerHTML = supRows(filtered);
+};
+
+
+window.saveSupPwdInline = async function(key, newPwd) {
+  newPwd = (newPwd||'').trim();
+  const inp = document.getElementById('sup-pwd-inp-'+key);
+  const row = document.getElementById('sup-row-'+key);
+  if (!newPwd) { if(inp){inp.style.borderColor='#dc2626';inp.focus();} return; }
+  if (inp) inp.style.borderColor='#f59e0b';
+  showSync();
+  try {
+    await fbPatch('/supervisors/'+key, {password:newPwd});
+    const idx=db.supervisors.findIndex(s=>s._key===key);
+    if(idx>=0) db.supervisors[idx].password=newPwd;
+    hideSync();
+    if(inp){inp.value=newPwd;inp.style.borderColor='#22c55e';inp.style.background='#f0fdf4';}
+    if(row){row.style.background='#dcfce7';setTimeout(()=>{row.style.background='';if(inp){inp.style.borderColor='#e2e8f0';inp.style.background='#f8fafc';}},1500);}
+  } catch(e){
+    hideSync();
+    if(inp) inp.style.borderColor='#dc2626';
+    alert('บันทึกไม่สำเร็จ: '+e.message);
+  }
+};
 
 // Supervisor password show/hide toggle
 window.toggleSupPwdView = function(key, pwd) {
@@ -2185,22 +2269,44 @@ window.saveAdminSupPwd = async function(key) {
 
 window.addSup=()=>{
   const dOpts=db.departments.map(d=>({v:d.name,l:d.name}));
-  openModal('เพิ่มหัวหน้างาน',`<div class="space-y-3">
-    <div><label class="text-xs font-medium text-gray-600 block mb-1">ชื่อ-นามสกุล *</label>${Inp('m-sn','text','','ชื่อ นามสกุล')}</div>
-    <div><label class="text-xs font-medium text-gray-600 block mb-1">สายงาน</label>${Sel('m-sd',dOpts)}</div>
-    <div><label class="text-xs font-medium text-gray-600 block mb-1">Username *</label>${Inp('m-su','text','','username')}</div>
-    <div><label class="text-xs font-medium text-gray-600 block mb-1">รหัสผ่าน *</label>${Inp('m-sp','text','','password')}</div>
-  </div>`,Btn('บันทึก','saveSup()')+Btn('ยกเลิก','closeModal()','gray'));
+  const selHtml=dOpts.map(o=>`<option value="${o.v}">${o.l}</option>`).join('');
+  const body=`<div class="space-y-3">
+    <div><label class="text-xs font-medium text-gray-600 block mb-1">ชื่อ-นามสกุล *</label>
+      <input id="m-sn" type="text" placeholder="ชื่อ นามสกุล" class="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-400 outline-none"></div>
+    <div><label class="text-xs font-medium text-gray-600 block mb-1">สายงาน</label>
+      <select id="m-sd" class="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-400 outline-none">${selHtml}</select></div>
+    <div><label class="text-xs font-medium text-gray-600 block mb-1">Username *</label>
+      <input id="m-su" type="text" placeholder="username" class="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-400 outline-none"></div>
+    <div><label class="text-xs font-medium text-gray-600 block mb-1">รหัสผ่าน *</label>
+      <input id="m-sp" type="text" placeholder="password" class="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-400 outline-none font-mono"></div>
+    <div id="add-sup-err" style="display:none;background:#fef2f2;color:#dc2626;border-radius:8px;padding:8px 12px;font-size:13px;"></div>
+  </div>`;
+  openModal('เพิ่มหัวหน้างาน', body,
+    `<button onclick="saveSup()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-lg text-sm font-bold"><i class="fas fa-save mr-1"></i>บันทึก</button>
+     <button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-4 py-2.5 rounded-lg text-sm font-medium">ยกเลิก</button>`);
+  setTimeout(()=>document.getElementById('m-sn')?.focus(),100);
 };
 window.saveSup=async()=>{
-  const n=document.getElementById('m-sn').value.trim(),d=document.getElementById('m-sd').value;
-  const u=document.getElementById('m-su').value.trim(),p=document.getElementById('m-sp').value.trim();
-  if(!n||!u||!p){alert('กรุณากรอกข้อมูลให้ครบ');return;}
-  if(db.supervisors.find(s=>s.username===u)){alert('Username นี้ถูกใช้แล้ว');return;}
+  const n=(document.getElementById('m-sn')?.value||'').trim();
+  const d=(document.getElementById('m-sd')?.value||'');
+  const u=(document.getElementById('m-su')?.value||'').trim();
+  const p=(document.getElementById('m-sp')?.value||'').trim();
+  const errEl=document.getElementById('add-sup-err');
+  const showErr=msg=>{if(errEl){errEl.textContent=msg;errEl.style.display='block';}};
+  if(errEl) errEl.style.display='none';
+  if(!n){showErr('กรุณากรอกชื่อ-นามสกุล');return;}
+  if(!u){showErr('กรุณากรอก Username');return;}
+  if(!p){showErr('กรุณากรอกรหัสผ่าน');return;}
+  if(db.supervisors.find(s=>s.username===u)){showErr('Username นี้ถูกใช้แล้ว');return;}
   showSync();
-  const res=await fbPush('/supervisors',{name:n,dept:d,username:u,password:p});
-  db.supervisors.push({_key:res.name,name:n,dept:d,username:u,password:p});
-  hideSync(); closeModal(); pgSups();
+  try {
+    const res=await fbPush('/supervisors',{name:n,dept:d,username:u,password:p});
+    db.supervisors.push({_key:res.name,name:n,dept:d,username:u,password:p});
+    hideSync(); closeModal();
+    const tbody=document.getElementById('sup-tbody');
+    if(tbody) tbody.innerHTML=supRows(db.supervisors);
+    else pgSups();
+  } catch(e){ hideSync(); showErr('บันทึกไม่สำเร็จ: '+e.message); }
 };
 window.editSupPwd=id=>{
   const s=db.supervisors.find(x=>x._key===id);
@@ -2222,7 +2328,114 @@ window.delSup=async id=>{
   showSync();
   await fbDelete(`/supervisors/${id}`);
   db.supervisors=db.supervisors.filter(s=>s._key!==id);
-  hideSync(); pgSups();
+  hideSync();
+  const tbody=document.getElementById('sup-tbody');
+  if(tbody) tbody.innerHTML=supRows(db.supervisors);
+  else pgSups();
+};
+
+// (inlineSaveSupPwd removed — use saveSupPwdInline)
+
+// ---- Supervisor GPS Timeline ----
+window.openSupTimeline = async function(supId, supName) {
+  openModal(`🗺 Timeline GPS — ${supName}`,
+    `<div id="sup-tl-body" style="min-height:200px;display:flex;align-items:center;justify-content:center;">
+      <div><div class="loading-spinner" style="width:28px;height:28px;border-width:3px;margin:0 auto 8px;"></div>
+      <div style="font-size:13px;color:#94a3b8;text-align:center;">กำลังโหลด GPS History...</div></div>
+    </div>`,
+    `<button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-4 py-2.5 rounded-lg text-sm font-medium">ปิด</button>`
+  );
+  const [histRaw, liveRaw] = await Promise.all([
+    fbGet('/liveTrackHistory/'+supId).catch(()=>null),
+    fbGet('/liveTrack/'+supId).catch(()=>null)
+  ]);
+  let points = histRaw ? Object.values(histRaw) : [];
+  if (liveRaw?.ts && !points.find(p=>Math.abs(p.ts-liveRaw.ts)<60000)) points.push(liveRaw);
+  points = points.filter(p=>p.lat&&p.lng).sort((a,b)=>a.ts-b.ts);
+
+  const body = document.getElementById('sup-tl-body');
+  if (!body) return;
+  if (!points.length) {
+    body.innerHTML = `<div style="text-align:center;padding:40px;color:#94a3b8;">
+      <i class="fas fa-route" style="font-size:40px;display:block;margin-bottom:12px;opacity:.3;"></i>
+      ยังไม่มีข้อมูล GPS History<br><span style="font-size:11px;margin-top:6px;display:block;">ระบบจะเก็บ History ทุก 5 นาทีเมื่อ Login</span></div>`;
+    return;
+  }
+
+  const fmt = ts => new Date(ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+  const fmtFull = ts => new Date(ts).toLocaleString('th-TH',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+
+  const byDay = {};
+  points.forEach(p=>{ const dk=new Date(p.ts).toISOString().slice(0,10); if(!byDay[dk])byDay[dk]=[]; byDay[dk].push(p); });
+
+  const mapId = 'tl-map-'+Date.now();
+  body.innerHTML = `
+    <div id="${mapId}" style="height:300px;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;margin-bottom:14px;"></div>
+    <div style="max-height:280px;overflow-y:auto;padding-right:4px;">
+      ${Object.entries(byDay).reverse().map(([dk,pts])=>{
+        const label=new Date(dk+'T00:00:00').toLocaleDateString('th-TH',{weekday:'short',day:'numeric',month:'short'});
+        const outCnt=pts.filter(p=>!p.inArea).length;
+        return `<div style="margin-bottom:14px;">
+          <div style="font-size:12px;font-weight:700;color:#1e293b;padding:5px 10px;background:#f8fafc;
+            border-radius:8px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;">
+            <span><i class="fas fa-calendar-day" style="color:#6366f1;margin-right:6px;"></i>${label}</span>
+            ${outCnt>0?`<span style="background:#fef2f2;color:#dc2626;font-size:10px;padding:2px 8px;border-radius:6px;font-weight:700;">${outCnt}× นอกพื้นที่</span>`:''}
+          </div>
+          ${pts.map((p,i)=>{
+            const col=p.inArea?'#16a34a':'#dc2626';
+            const isLast=i===pts.length-1;
+            return `<div style="display:flex;gap:10px;padding:4px 0;">
+              <div style="display:flex;flex-direction:column;align-items:center;width:18px;flex-shrink:0;">
+                <div style="width:11px;height:11px;border-radius:50%;background:${col};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.2);flex-shrink:0;"></div>
+                ${!isLast?`<div style="width:2px;flex:1;background:#e2e8f0;min-height:10px;margin-top:2px;"></div>`:''}
+              </div>
+              <div style="flex:1;padding-bottom:${isLast?0:8}px;">
+                <span style="font-size:11px;font-weight:700;color:#64748b;">${fmt(p.ts)}</span>
+                <span style="font-size:12px;font-weight:600;color:${col};margin-left:8px;">${p.inArea?'✅ ในพื้นที่':'🚨 นอกพื้นที่'}</span>
+                ${!p.inArea?`<span style="font-size:10px;color:#dc2626;"> · ห่าง ${Math.round(p.dist||0)} ม.</span>`:''}
+                ${p.loc?`<div style="font-size:10px;color:#94a3b8;">📍 ${p.loc}</div>`:''}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>`;
+      }).join('')}
+    </div>`;
+
+  setTimeout(()=>{
+    if(typeof L==='undefined') return;
+    const el=document.getElementById(mapId); if(!el) return;
+    const ctr=[points[points.length-1].lat, points[points.length-1].lng];
+    const tlMap=L.map(el,{zoomControl:true}).setView(ctr,14);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap',maxZoom:19}).addTo(tlMap);
+    const aC=['#3b82f6','#10b981','#f59e0b','#ef4444'];
+    gpsLocations.forEach((loc,i)=>{
+      L.circle([loc.lat,loc.lng],{radius:loc.radius||100,color:aC[i%4],fillColor:aC[i%4],fillOpacity:0.08,weight:2,dashArray:'5,4'}).addTo(tlMap);
+    });
+    const lls=points.map(p=>[p.lat,p.lng]);
+    L.polyline(lls,{color:'#6366f1',weight:3,opacity:0.75,dashArray:'7,4'}).addTo(tlMap);
+    points.forEach((p,i)=>{
+      const col=p.inArea?'#16a34a':'#dc2626';
+      const isEdge=i===0||i===points.length-1;
+      const prevIn=i>0?points[i-1].inArea:p.inArea;
+      const changed=p.inArea!==prevIn;
+      const sz=isEdge?16:changed?12:7;
+      const icon=L.divIcon({
+        html:`<div style="width:${sz}px;height:${sz}px;border-radius:50%;background:${col};border:${isEdge?'3':'2'}px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,.4);"></div>`,
+        className:'',iconSize:[sz,sz],iconAnchor:[sz/2,sz/2]
+      });
+      const m=L.marker([p.lat,p.lng],{icon}).addTo(tlMap);
+      m.bindPopup(`<div style="font-family:Sarabun,sans-serif;min-width:160px;">
+        <div style="font-weight:700;color:${col};">${p.inArea?'✅ ในพื้นที่':'🚨 นอกพื้นที่'}</div>
+        <div style="font-size:12px;color:#64748b;">${fmtFull(p.ts)}</div>
+        ${!p.inArea?`<div style="font-size:12px;color:#dc2626;">ห่าง ${Math.round(p.dist||0)} ม.</div>`:''}
+        ${p.loc?`<div style="font-size:11px;color:#94a3b8;">📍 ${p.loc}</div>`:''}
+      </div>`);
+      if(i===0) m.bindTooltip('เริ่ม',{permanent:true,direction:'top',offset:[0,-8]});
+      if(i===points.length-1) m.bindTooltip('ล่าสุด',{permanent:true,direction:'top',offset:[0,-8]});
+    });
+    try{tlMap.fitBounds(L.latLngBounds(lls),{padding:[28,28],maxZoom:15});}catch(_){}
+    setTimeout(()=>{try{tlMap.invalidateSize();}catch(_){}},150);
+  },300);
 };
 
 // =====================================================================
@@ -2230,45 +2443,127 @@ window.delSup=async id=>{
 // =====================================================================
 function pgEmps(filterSupKey=''){
   const mc=document.getElementById('main-content');
-  const emps=filterSupKey?db.employees.filter(e=>e.supId===filterSupKey):db.employees;
+  const emps=filterSupKey?db.employees.filter(e=>empBelongsToSup(e,filterSupKey)):db.employees;
   mc.innerHTML=card(sHead('รายชื่อพนักงาน',`<div class="flex gap-2 flex-wrap">
     <input type="text" id="esrch" placeholder="ค้นหา..." class="border rounded-lg px-3 py-2 text-sm w-36 focus:outline-none focus:ring-1" oninput="filterEmps(this.value,'${filterSupKey}')">
     ${!filterSupKey?`
     <button onclick="downloadEmpTemplate()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg text-sm flex items-center gap-1.5 border"><i class="fas fa-download text-green-600"></i>Template</button>
     <label class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg text-sm flex items-center gap-1.5 cursor-pointer shadow-sm"><i class="fas fa-upload"></i>Import Excel<input type="file" accept=".xlsx,.xls" style="display:none" onchange="importEmpExcel(this)"></label>`:''}
     ${Btn('<i class="fas fa-plus mr-1"></i>เพิ่มพนักงาน','openEmpMod(null)')}</div>`)
-    +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','เบอร์','สายงาน','หัวหน้า','ค่าแรง','OT/ชม.','Username','รหัสผ่าน','จัดการ')}
+    +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','เบอร์','สายงาน','หัวหน้างาน','ค่าแรง','OT/ชม.','Username','รหัสผ่าน','จัดการ')}
     <tbody id="emp-tbody">${empRows(emps)}</tbody></table></div>`);
 }
 
 // ---- Download Template Excel ----
 window.downloadEmpTemplate = function() {
   const wb = XLSX.utils.book_new();
-  const headers = ['รหัส(ไม่บังคับ)','ชื่อ-นามสกุล*','เบอร์โทร','สายงาน*','หัวหน้างาน(ชื่อ)*','ค่าแรง/วัน','Username*','รหัสผ่าน*'];
-  const note   = ['','หมายเหตุ: * = จำเป็น | ชื่อหัวหน้าต้องตรงกับระบบ | สายงานต้องตรงกับที่กำหนดไว้','','','','','',''];
-  const supEx  = db.supervisors.length ? db.supervisors[0].name : 'ชื่อหัวหน้างาน';
-  const deptEx = db.departments.length ? db.departments[0].name : 'สายงาน';
-  const ex1    = ['','นายสมชาย ใจดี','081-234-5678',deptEx,supEx,'400','somchai','1234'];
-  const ex2    = ['','นางสมหญิง รักงาน','082-345-6789',deptEx,supEx,'450','somying','1234'];
+  // คอลัมน์ใหม่: ชื่อ*/นามสกุล* แยก + เบอร์โทร + สายงาน + ค่าแรง + OT + Username* + รหัสผ่าน + หัวหน้างาน*
+  const headers = [
+    'ชื่อ*',
+    'นามสกุล*',
+    'เบอร์โทร',
+    'สายงาน (เช่น งานเรือ)',
+    'ค่าแรง/วัน',
+    'OT/ชม.',
+    'Username*',
+    'รหัสผ่าน (ค่าเริ่มต้น 1234)',
+    'หัวหน้างาน (ชื่อ-นามสกุล)* — ถ้าไม่มีในระบบจะสร้างอัตโนมัติ'
+  ];
+  const note = [
+    '⚠️ * = จำเป็น  |  ชื่อ+นามสกุลจะถูกรวมเป็นชื่อเต็ม  |  หัวหน้างานที่ยังไม่มีในระบบจะถูกสร้างอัตโนมัติ (username=ชื่อ, รหัส=1234)',
+    '','','','','','','',''
+  ];
 
-  // Sheet 1: Template
-  const ws = XLSX.utils.aoa_to_sheet([headers, note, [], ex1, ex2]);
-  ws['!cols'] = [{wch:16},{wch:24},{wch:14},{wch:18},{wch:22},{wch:12},{wch:14},{wch:12}];
-  // Highlight header row
+  // ตัวอย่างข้อมูล — ใช้หัวหน้า/สายงาน จากระบบจริง ถ้ามี
+  const supEx  = db.supervisors.length ? db.supervisors[0].name : 'สมศักดิ์ มั่นคง';
+  const deptEx = db.departments.length ? db.departments[0].name : 'งานเรือ';
+  const otEx   = db.wage?.otRate || 75;
+  const wageEx = db.wage?.defaultWage || 400;
+
+  const ex1 = ['นายสมชาย', 'ใจดี',   '081-234-5678', deptEx, wageEx,    otEx, 'somchai', '1234', supEx];
+  const ex2 = ['นางสมหญิง', 'รักงาน', '082-345-6789', deptEx, wageEx+50, otEx, 'somying', '1234', supEx];
+  const ex3 = ['', '', '', '', '', '', '', '', ''];  // แถวว่างให้กรอก
+
+  // หัวหน้างานในระบบปัจจุบัน (แสดงเป็น reference)
+  const supList = db.supervisors.length
+    ? [['--- หัวหน้างานในระบบ (คัดลอกชื่อมาใส่คอลัมน์ หัวหน้างาน) ---'],
+       ...db.supervisors.map(s=>[s.name + (s.dept ? ' ('+s.dept+')' : '')])]
+    : [['ยังไม่มีหัวหน้างานในระบบ — กรอกชื่อใหม่เพื่อสร้างอัตโนมัติ']];
+
+  const rows = [headers, note, [], ex1, ex2, ex3, [], ...supList];
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [
+    {wch:14}, {wch:16}, {wch:14}, {wch:18}, {wch:12}, {wch:10}, {wch:14}, {wch:22}, {wch:36}
+  ];
   XLSX.utils.book_append_sheet(wb, ws, 'พนักงาน');
-
-  // Sheet 2: Ref — supervisor list
-  const supData = [['ชื่อหัวหน้างาน','สายงาน','Username'],...db.supervisors.map(s=>[s.name,s.dept||'-',s.username])];
-  const ws2 = XLSX.utils.aoa_to_sheet(supData);
-  ws2['!cols'] = [{wch:24},{wch:18},{wch:16}];
-  XLSX.utils.book_append_sheet(wb, ws2, 'หัวหน้างาน (อ้างอิง)');
-
-  // Sheet 3: Ref — department list
-  const deptData = [['ชื่อสายงาน'],...db.departments.map(d=>[d.name])];
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(deptData), 'สายงาน (อ้างอิง)');
-
   XLSX.writeFile(wb, 'employee_template.xlsx');
 };
+
+// ---- Helper: Fuzzy match supervisor by name (normalize spaces, case-insensitive) ----
+function normName(s) {
+  return String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
+}
+function findSupFuzzy(supTrim) {
+  if (!supTrim) return null;
+  const q = normName(supTrim);
+  // 1) exact match
+  let found = db.supervisors.find(s => normName(s.name) === q);
+  if (found) return found;
+  // 2) contains match (ชื่อในระบบมีคำค้น หรือคำค้นมีชื่อในระบบ)
+  found = db.supervisors.find(s => {
+    const sn = normName(s.name);
+    return sn.includes(q) || q.includes(sn);
+  });
+  if (found) return found;
+  // 3) token match — ทุก token ของชื่อที่กรอกมีในชื่อในระบบ
+  const tokens = q.split(' ').filter(Boolean);
+  found = db.supervisors.find(s => {
+    const sn = normName(s.name);
+    return tokens.length > 0 && tokens.every(t => sn.includes(t));
+  });
+  return found || null;
+}
+
+// ---- Helper: resolve supervisor _key for an employee (supId OR name fallback) ----
+function getEmpSupKey(emp) {
+  if (emp.supId && db.supervisors.some(s => s._key === emp.supId)) return emp.supId;
+  // fallback: ค้นหาจากชื่อ
+  const sup = findSupFuzzy(emp.sup);
+  return sup ? sup._key : (emp.supId || '');
+}
+
+// ---- Helper: check if employee belongs to supervisor (by _key OR name) ----
+function empBelongsToSup(emp, supKey) {
+  if (emp.supId === supKey) return true;
+  const sup = db.supervisors.find(s => s._key === supKey);
+  if (!sup) return false;
+  return normName(emp.sup) !== '' && normName(emp.sup) === normName(sup.name);
+}
+
+// ---- Helper: check if attendance record belongs to current supervisor ----
+function recBelongsToCurrentSup(r) {
+  if (!CU || CU.role !== 'supervisor') return true;
+  if (r.supId === CU.id) return true;
+  const sup = db.supervisors.find(s => s._key === CU.id);
+  if (!sup) return false;
+  return r.sup && normName(r.sup) === normName(sup.name);
+}
+
+// ---- Auto-heal: fix empty supId for employees that have sup name but no supId ----
+async function healEmployeeSupIds() {
+  const toFix = db.employees.filter(e => (!e.supId || !db.supervisors.some(s => s._key === e.supId)) && e.sup);
+  if (!toFix.length) return;
+  for (const emp of toFix) {
+    const sup = findSupFuzzy(emp.sup);
+    if (sup && emp.supId !== sup._key) {
+      try {
+        await fbPatch('/employees/' + emp._key, { supId: sup._key, sup: sup.name });
+        emp.supId = sup._key;
+        emp.sup   = sup.name;
+      } catch(e) { console.warn('heal supId failed', emp._key, e); }
+    }
+  }
+}
 
 // ---- Import Employee Excel ----
 window.importEmpExcel = async function(input) {
@@ -2278,66 +2573,135 @@ window.importEmpExcel = async function(input) {
   reader.onload = async e => {
     const data = new Uint8Array(e.target.result);
     const wb   = XLSX.read(data, { type: 'array' });
-    const ws   = wb.Sheets[wb.SheetNames[0]];
+    // ใช้ sheet ชื่อ 'พนักงาน' ก่อน ถ้าไม่มีใช้ sheet แรก
+    const wsName = wb.SheetNames.find(n => n === 'พนักงาน') || wb.SheetNames[0];
+    const ws   = wb.Sheets[wsName];
     const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
     if (rows.length < 2) return alert('ไฟล์ว่างหรือไม่มีข้อมูล');
 
-    // Find header row (row with ชื่อ-นามสกุล)
+    // หา header row (มีคำว่า ชื่อ หรือ นามสกุล)
     let dataStart = 1;
-    for (let i = 0; i < Math.min(5, rows.length); i++) {
-      if (rows[i].some(c => String(c).includes('ชื่อ-นามสกุล') || String(c).includes('ชื่อ'))) {
+    for (let i = 0; i < Math.min(6, rows.length); i++) {
+      if (rows[i].some(c => String(c).includes('ชื่อ-นามสกุล') || String(c).includes('ชื่อ') || String(c).includes('นามสกุล'))) {
         dataStart = i + 1; break;
       }
     }
 
+    // ตรวจ format จาก header row
+    const hdr = rows[dataStart-1] || [];
+    const hdr0 = String(hdr[0]||'').trim();
+    const hdr1 = String(hdr[1]||'').trim();
+    // format ใหม่ v2: ชื่อ* | นามสกุล* | เบอร์ | สายงาน | ค่าแรง | OT | username | password | หัวหน้างาน
+    const isSplitName = hdr0.includes('ชื่อ') && (hdr1.includes('นามสกุล'));
+    // format ใหม่ v1: ชื่อ-นามสกุล | เบอร์ | สายงาน | หัวหน้า | ค่าแรง | OT | username | password
+    const isNewFormat = !isSplitName && hdr0.includes('ชื่อ');
+    // format เก่า: รหัส | ชื่อ | เบอร์ | สายงาน | หัวหน้า | ค่าแรง | username | password
+
     const toAdd = [], skipped = [], errors = [];
+    const newSups = {}; // supName -> { username, dept } สำหรับ auto-create
+
     for (let i = dataStart; i < rows.length; i++) {
       const row = rows[i];
-      if (!row.some(c => c)) continue; // skip empty rows
-      const [, name, phone, dept, supName, wageRaw, username, password] = row;
+      if (!row.some(c => c !== '')) continue; // skip empty
+
+      let name, phone, dept, supName, wageRaw, otRaw, username, password;
+      if (isSplitName) {
+        // format v2 (template ใหม่): ชื่อ | นามสกุล | เบอร์ | สายงาน | ค่าแรง | OT | username | password | หัวหน้างาน
+        const [fn, ln, ph, dp, wr, or_, un, pw, sn] = row;
+        const firstName = String(fn||'').trim();
+        const lastName  = String(ln||'').trim();
+        name     = [firstName, lastName].filter(Boolean).join(' ');
+        phone    = ph; dept = dp; wageRaw = wr; otRaw = or_; username = un; password = pw; supName = sn;
+      } else if (isNewFormat) {
+        // format v1: ชื่อ-นามสกุล | เบอร์ | สายงาน | หัวหน้า | ค่าแรง | OT | username | password
+        [name, phone, dept, supName, wageRaw, otRaw, username, password] = row;
+      } else {
+        // format เก่า: รหัส | ชื่อ | เบอร์ | สายงาน | หัวหน้า | ค่าแรง | username | password
+        const [, n, ph, dp, sn, wr, un, pw] = row;
+        [name, phone, dept, supName, wageRaw, otRaw, username, password] = [n, ph, dp, sn, wr, '', un, pw];
+      }
+
       const nameTrim = String(name||'').trim();
       const userTrim = String(username||'').trim();
-      if (!nameTrim || !userTrim) { errors.push(`แถว ${i+1}: ชื่อ/Username ว่าง`); continue; }
-      // Check duplicate username
-      if (db.employees.find(ex => ex.username === userTrim)) {
-        skipped.push(nameTrim + ' (' + userTrim + ')'); continue;
-      }
-      // Find supervisor by name
-      const sup = db.supervisors.find(s => s.name === String(supName||'').trim());
+      const supTrim  = String(supName||'').trim();
       const deptTrim = String(dept||'').trim();
-      const wage = parseInt(wageRaw) || db.wage.defaultWage;
+
+      if (!nameTrim) continue; // ข้ามแถวว่าง
+      if (!userTrim) {
+        // ถ้าไม่มี username ให้ใช้ชื่อเป็น username (ตัวเล็ก ไม่มีช่องว่าง)
+        const autoUser = nameTrim.replace(/\s+/g,'').toLowerCase();
+        errors.push(`แถว ${i+1}: "${nameTrim}" ไม่มี Username — ข้าม (แนะนำ: ${autoUser})`);
+        continue;
+      }
+
+      // ตรวจ username ซ้ำ
+      if (db.employees.find(ex => ex.username === userTrim)) {
+        skipped.push(`${nameTrim} (${userTrim})`); continue;
+      }
+
+      // หา supervisor — ใช้ fuzzy match (รองรับ space ต่างกัน, case-insensitive, ชื่อบางส่วน)
+      let sup = findSupFuzzy(supTrim);
+      if (!sup && supTrim) {
+        // ยังไม่มีใน db — จะสร้าง auto ตอน doImport
+        if (!newSups[supTrim]) {
+          // generate username จากชื่อ
+          const supUser = supTrim.replace(/\s+/g,'').toLowerCase();
+          newSups[supTrim] = { name: supTrim, dept: deptTrim, username: supUser, password: '1234' };
+        }
+      }
+
+      const wage  = parseInt(wageRaw)  || db.wage.defaultWage;
+      const otRate = parseInt(otRaw)   || db.wage.otRate || 75;
+      // ใช้ชื่อจริงจากระบบ ถ้า fuzzy match เจอ — เพื่อความสม่ำเสมอ
+      const resolvedSupName = sup ? sup.name : supTrim;
       toAdd.push({
         name: nameTrim,
         phone: String(phone||'').trim(),
         dept: deptTrim,
-        sup: sup?.name || String(supName||'').trim(),
-        supId: sup?._key || '',
-        wage, username: userTrim,
-        password: String(password||'1234').trim()
+        sup: resolvedSupName,
+        supId: sup?._key || '',   // จะ patch ใหม่ใน doImport ถ้า sup ยังไม่มี
+        wage, otRate,
+        username: userTrim,
+        password: String(password||'').trim() || '1234',
+        _pendingSupName: sup ? null : (supTrim || null)  // flag สำหรับ auto-create
       });
     }
 
     if (!toAdd.length && !skipped.length && !errors.length) return alert('ไม่พบข้อมูลในไฟล์');
 
+    const newSupCount = Object.keys(newSups).length;
+
     // Preview modal
     const body = `
       <div style="font-size:13px;margin-bottom:12px;">
-        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
-          <span style="background:#dcfce7;color:#166534;padding:4px 12px;border-radius:20px;font-weight:600;">✅ เพิ่มได้ ${toAdd.length} คน</span>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+          <span style="background:#dcfce7;color:#166534;padding:4px 12px;border-radius:20px;font-weight:600;">✅ เพิ่มพนักงาน ${toAdd.length} คน</span>
+          ${newSupCount?`<span style="background:#dbeafe;color:#1e40af;padding:4px 12px;border-radius:20px;font-weight:600;">👔 สร้างหัวหน้างานใหม่ ${newSupCount} คน</span>`:''}
           ${skipped.length?`<span style="background:#fef9c3;color:#854d0e;padding:4px 12px;border-radius:20px;font-weight:600;">⏭️ ข้าม ${skipped.length} คน (ซ้ำ)</span>`:''}
-          ${errors.length?`<span style="background:#fee2e2;color:#991b1b;padding:4px 12px;border-radius:20px;font-weight:600;">❌ ข้อผิดพลาด ${errors.length}</span>`:''}
+          ${errors.length?`<span style="background:#fee2e2;color:#991b1b;padding:4px 12px;border-radius:20px;font-weight:600;">❌ ${errors.length} ข้อผิดพลาด</span>`:''}
         </div>
+        ${newSupCount?`<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;margin-bottom:10px;">
+          <div style="font-weight:700;color:#1e40af;margin-bottom:6px;font-size:12px;">👔 หัวหน้างานที่จะสร้างใหม่อัตโนมัติ:</div>
+          ${Object.values(newSups).map(s=>`
+            <div style="display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid #dbeafe;font-size:12px;">
+              <span style="font-weight:600;color:#1e293b;">${s.name}</span>
+              <span style="color:#64748b;">username: <code>${s.username}</code></span>
+              <span style="color:#64748b;">รหัส: <code>1234</code></span>
+            </div>`).join('')}
+        </div>`:''}
         ${toAdd.length?`<div style="max-height:200px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:10px;">
           <table style="width:100%;font-size:12px;border-collapse:collapse;">
-            <thead style="background:#f8fafc;"><tr>
+            <thead style="background:#f8fafc;position:sticky;top:0;"><tr>
               <th style="padding:7px 10px;text-align:left;">ชื่อ</th>
               <th style="padding:7px 10px;text-align:left;">สายงาน</th>
+              <th style="padding:7px 10px;text-align:left;">หัวหน้า</th>
               <th style="padding:7px 10px;text-align:left;">Username</th>
               <th style="padding:7px 10px;text-align:right;">ค่าแรง</th>
             </tr></thead>
             <tbody>${toAdd.map((r,i)=>`<tr style="border-top:1px solid #f1f5f9;background:${i%2?'#f8fafc':''}">
               <td style="padding:6px 10px;">${r.name}</td>
               <td style="padding:6px 10px;color:#64748b;">${r.dept||'-'}</td>
+              <td style="padding:6px 10px;color:${r._pendingSupName?'#2563eb':'#374151'};">${r.sup||'-'}${r._pendingSupName?' ✨':''}</td>
               <td style="padding:6px 10px;font-family:monospace;color:#2563eb;">${r.username}</td>
               <td style="padding:6px 10px;text-align:right;">฿${r.wage.toLocaleString()}</td>
             </tr>`).join('')}</tbody>
@@ -2348,28 +2712,68 @@ window.importEmpExcel = async function(input) {
       </div>`;
     openModal('ยืนยันการนำเข้าพนักงาน', body,
       toAdd.length
-        ? `<button onclick="doImportEmp()" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-lg text-sm font-bold"><i class="fas fa-upload mr-1"></i>นำเข้า ${toAdd.length} คน</button>
+        ? `<button onclick="doImportEmp()" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-lg text-sm font-bold"><i class="fas fa-upload mr-1"></i>นำเข้าเลย</button>
            <button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-4 py-2.5 rounded-lg text-sm">ยกเลิก</button>`
         : `<button onclick="closeModal()" class="bg-gray-200 text-gray-700 px-6 py-2.5 rounded-lg text-sm font-medium">ปิด</button>`);
     window._importQueue = toAdd;
+    window._importNewSups = newSups;
   };
   reader.readAsArrayBuffer(file);
 };
 
 window.doImportEmp = async function() {
-  const queue = window._importQueue || []; if (!queue.length) return;
+  const queue   = window._importQueue  || [];
+  const newSups = window._importNewSups || {};
+  if (!queue.length) return;
   showSync();
+
+  // STEP 1: สร้างหัวหน้างานใหม่ที่ยังไม่มีในระบบ
+  const supKeyMap = {}; // supName -> _key
+  for (const [supName, supData] of Object.entries(newSups)) {
+    try {
+      // ตรวจซ้ำอีกครั้ง (กรณีมีการเพิ่มระหว่างรอ)
+      let existing = findSupFuzzy(supName);
+      if (existing) {
+        supKeyMap[supName] = existing._key;
+        continue;
+      }
+      const res = await fbPush('/supervisors', supData);
+      db.supervisors.push({ _key: res.name, ...supData });
+      supKeyMap[supName] = res.name;
+    } catch(e) { console.error('create sup error:', e); }
+  }
+
+  // STEP 2: เพิ่มพนักงาน — patch supId ถ้ายังไม่มี
   let done = 0;
   for (const rec of queue) {
-    const res = await fbPush('/employees', rec);
-    db.employees.push({ _key: res.name, ...rec });
-    done++;
+    try {
+      // ถ้ามี _pendingSupName ให้หา key ที่เพิ่งสร้าง หรือหาจาก db
+      if (rec._pendingSupName) {
+        const key = supKeyMap[rec._pendingSupName]
+          || findSupFuzzy(rec._pendingSupName)?._key
+          || '';
+        rec.supId = key;
+        rec.sup   = rec._pendingSupName;
+      }
+      delete rec._pendingSupName;
+      const res = await fbPush('/employees', rec);
+      db.employees.push({ _key: res.name, ...rec });
+      done++;
+    } catch(e) { console.error('import emp error:', e); }
   }
-  window._importQueue = [];
+
+  window._importQueue   = [];
+  window._importNewSups = {};
   hideSync();
   closeModal();
   pgEmps();
-  alert(`✅ นำเข้าสำเร็จ ${done} คน`);
+
+  // รีเฟรช pgSups ด้วยถ้าอยู่ในหน้านั้น (ผ่าน tbody)
+  const supTbody = document.getElementById('sup-tbody');
+  if (supTbody) supTbody.innerHTML = supRows(db.supervisors);
+
+  const newSupCount = Object.keys(supKeyMap).length;
+  alert(`✅ นำเข้าสำเร็จ\n👤 พนักงาน ${done} คน${newSupCount ? '\n👔 สร้างหัวหน้างานใหม่ ' + newSupCount + ' คน' : ''}`);
 };
 function empRows(emps){
   return emps.length===0?EmptyR(10):emps.map(e=>`<tr class="hover:bg-gray-50" id="emp-row-${e._key}">
@@ -2391,17 +2795,19 @@ function empRows(emps){
         onchange="saveInlineOTRate('${e._key}',this.value)" title="แก้ไขค่า OT/ชม.">
     </td>
     <td class="px-4 py-2 font-mono text-blue-700 text-xs">${e.username}</td>
-    <td class="px-4 py-2">
-      <div style="display:flex;align-items:center;gap:6px;">
-        <span id="pwd-text-${e._key}" style="font-family:monospace;font-size:12px;color:#1e293b;letter-spacing:1px;">\u2022\u2022\u2022\u2022\u2022\u2022</span>
-        <button onclick="togglePwdView('${e._key}','${(e.password||'').replace(/'/g,"\\'")}')"
-          id="pwd-eye-${e._key}" style="background:none;border:none;cursor:pointer;color:#94a3b8;padding:2px 4px;border-radius:4px;font-size:12px;" title="\u0e41\u0e2a\u0e14\u0e07/\u0e0b\u0e48\u0e2d\u0e19\u0e23\u0e2b\u0e31\u0e2a\u0e1c\u0e48\u0e32\u0e19">
-          <i class="fas fa-eye" id="pwd-eye-icon-${e._key}"></i>
-        </button>
-        <button onclick="adminEditPwd('${e._key}','${e.name.replace(/'/g,"\\'")}')"
-          style="background:#f1f5f9;border:1px solid #e2e8f0;cursor:pointer;color:#475569;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;">
-          <i class="fas fa-key" style="margin-right:3px;"></i>\u0e40\u0e1b\u0e25\u0e35\u0e48\u0e22\u0e19
-        </button>
+    <td class="px-4 py-2" style="min-width:185px;">
+      <div style="display:flex;align-items:center;gap:5px;">
+        <input id="emp-pwd-inp-${e._key}" type="text" value="${(e.password||'').replace(/"/g,'&quot;')}"
+          style="width:110px;border:1.5px solid #e2e8f0;border-radius:8px;padding:4px 8px;
+            font-family:monospace;font-size:12px;color:#1e293b;outline:none;background:#f8fafc;transition:all .15s;"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();window.saveEmpPwdInline('${e._key}',this.value);}"
+          onfocus="this.style.borderColor='#6366f1';this.style.background='#fff';"
+          onblur="this.style.borderColor='#e2e8f0';this.style.background='#f8fafc';">
+        <button onclick="window.saveEmpPwdInline('${e._key}',document.getElementById('emp-pwd-inp-${e._key}').value)"
+          title="บันทึก"
+          style="background:#6366f1;color:#fff;border:none;border-radius:8px;padding:5px 8px;
+            font-size:14px;cursor:pointer;flex-shrink:0;transition:background .15s;"
+          onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">💾</button>
       </div>
     </td>
     <td class="px-4 py-2 flex gap-2">
@@ -2443,6 +2849,28 @@ window.saveInlineOTRate = async function(empKey, val) {
     if (input) { input.style.background='#fef9c3'; setTimeout(()=>{ if(input)input.style.background='#fffbeb'; },1200); }
   } catch(e) { alert('\u0e1a\u0e31\u0e19\u0e17\u0e36\u0e01\u0e44\u0e21\u0e48\u0e2a\u0e33\u0e40\u0e23\u0e47\u0e08: ' + e.message); }
 }
+
+// Inline password save — fires on Enter or 💾 button
+window.saveEmpPwdInline = async function(empKey, newPwd) {
+  newPwd = (newPwd||'').trim();
+  const inp = document.getElementById('emp-pwd-inp-'+empKey);
+  const row = document.getElementById('emp-row-'+empKey);
+  if (!newPwd) { if(inp){inp.style.borderColor='#dc2626';inp.focus();} return; }
+  if (inp) inp.style.borderColor='#f59e0b';
+  showSync();
+  try {
+    await fbPatch('/employees/'+empKey, {password:newPwd});
+    const idx=db.employees.findIndex(e=>e._key===empKey);
+    if(idx>=0) db.employees[idx].password=newPwd;
+    hideSync();
+    if(inp){inp.value=newPwd;inp.style.borderColor='#22c55e';inp.style.background='#f0fdf4';}
+    if(row){row.style.background='#dcfce7';setTimeout(()=>{row.style.background='';if(inp){inp.style.borderColor='#e2e8f0';inp.style.background='#f8fafc';}},1500);}
+  } catch(e){
+    hideSync();
+    if(inp) inp.style.borderColor='#dc2626';
+    alert('บันทึกไม่สำเร็จ: '+e.message);
+  }
+};
 
 // Toggle show/hide password in table
 window.togglePwdView = function(empKey, pwd) {
@@ -2526,7 +2954,7 @@ window.saveAdminPwd = async function(empKey) {
 };
 window.filterEmps=(q,fs)=>{
   const tbody=document.getElementById('emp-tbody');if(!tbody)return;
-  const base=fs?db.employees.filter(e=>e.supId===fs):db.employees;
+  const base=fs?db.employees.filter(e=>empBelongsToSup(e,fs)):db.employees;
   tbody.innerHTML=empRows(base.filter(e=>!q||e.name.toLowerCase().includes(q.toLowerCase())||e._key.toLowerCase().includes(q.toLowerCase())));
 };
 window.openEmpMod=function(key){
@@ -2799,7 +3227,7 @@ async function loadRptDaily(dk){
   await loadAttendanceDate(dk);
   const isSup=CU.role==='supervisor';
   let recs=getAttendanceArray(dk);
-  if(isSup)recs=recs.filter(r=>r.supId===CU.id);
+  if(isSup)recs=recs.filter(r=>recBelongsToCurrentSup(r));
   const tW=recs.reduce((s,r)=>s+r.wage,0),tO=recs.reduce((s,r)=>s+r.otPay,0),tA=recs.reduce((s,r)=>s+r.total,0);
 
   // คำนวณมาสาย
@@ -2877,7 +3305,7 @@ async function loadRptMonthly(month){
   Object.entries(db.attendance).forEach(([k,bucket])=>{
     if(!k.startsWith(month))return;
     Object.values(bucket||{}).forEach(r=>{
-      if(isSup&&r.supId!==CU.id)return;
+      if(isSup&&!recBelongsToCurrentSup(r))return;
       if(!em[r.empId])em[r.empId]={...r,days:0,otH:0,wage:0,otPay:0,total:0,places:new Set()};
       em[r.empId].days++;em[r.empId].otH+=r.otHours;em[r.empId].wage+=r.wage;em[r.empId].otPay+=r.otPay;em[r.empId].total+=r.total;em[r.empId].places.add(r.dept);
     });
@@ -3568,146 +3996,106 @@ window.selectSearchResult = function(lat, lon, displayName) {
 };
 function pgManagePwd(){
   const mc=document.getElementById('main-content');
-  const supRows = s => `<tr class="hover:bg-gray-50" id="mpwd-sup-${s._key}">
-    <td class="px-3 py-2.5 font-medium text-sm">${s.name}</td>
-    <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${s.username}</td>
-    <td class="px-3 py-2.5">
-      <div style="display:flex;align-items:center;gap:5px;">
-        <span id="mpwd-sup-val-${s._key}" style="font-family:monospace;font-size:12px;color:#1e293b;min-width:60px;">••••••</span>
-        <button onclick="window._mpwdToggle('sup','${s._key}','${(s.password||'').replace(/'/g,"\\'")}')"
-          style="background:none;border:none;cursor:pointer;color:#94a3b8;font-size:12px;padding:2px;">
-          <i class="fas fa-eye" id="mpwd-sup-eye-${s._key}"></i></button>
-        <button onclick="window._mpwdEdit('sup','${s._key}','${s.name.replace(/'/g,"\\'")}')"
-          style="background:#ede9fe;border:none;cursor:pointer;color:#7c3aed;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;font-family:Sarabun,sans-serif;">
-          <i class="fas fa-edit" style="margin-right:3px;"></i>แก้ไข</button>
-      </div>
-    </td>
-  </tr>`;
-  const empRows2 = e => `<tr class="hover:bg-gray-50" id="mpwd-emp-${e._key}">
-    <td class="px-3 py-2.5 font-medium text-sm">${e.name}</td>
-    <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${e.username}</td>
-    <td class="px-3 py-2.5">
-      <div style="display:flex;align-items:center;gap:5px;">
-        <span id="mpwd-emp-val-${e._key}" style="font-family:monospace;font-size:12px;color:#1e293b;min-width:60px;">••••••</span>
-        <button onclick="window._mpwdToggle('emp','${e._key}','${(e.password||'').replace(/'/g,"\\'")}')"
-          style="background:none;border:none;cursor:pointer;color:#94a3b8;font-size:12px;padding:2px;">
-          <i class="fas fa-eye" id="mpwd-emp-eye-${e._key}"></i></button>
-        <button onclick="window._mpwdEdit('emp','${e._key}','${e.name.replace(/'/g,"\\'")}')"
-          style="background:#ede9fe;border:none;cursor:pointer;color:#7c3aed;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;font-family:Sarabun,sans-serif;">
-          <i class="fas fa-edit" style="margin-right:3px;"></i>แก้ไข</button>
-      </div>
-    </td>
-  </tr>`;
+  const mkRow=(type,obj)=>{
+    const safePwd=(obj.password||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+    const id=`mpwd-${type}-${obj._key}`;
+    return `<tr class="hover:bg-gray-50" id="${id}">
+      <td class="px-3 py-2.5 font-medium text-sm">${obj.name}</td>
+      <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${obj.username}</td>
+      <td class="px-3 py-2.5" style="min-width:220px;">
+        <div style="display:flex;align-items:center;gap:6px;">
+          <input id="mpwd-inp-${obj._key}-${type}" type="text" value="${safePwd}"
+            style="border:1px solid #e2e8f0;border-radius:8px;padding:4px 10px;font-family:monospace;
+              font-size:12px;color:#1e293b;width:120px;outline:none;background:#f8fafc;"
+            onkeydown="if(event.key==='Enter')window._mpwdInlineSave('${type}','${obj._key}',this.value)"
+            onfocus="this.style.borderColor='#6366f1';this.style.background='#fff'"
+            onblur="this.style.borderColor='#e2e8f0';this.style.background='#f8fafc'">
+          <button onclick="window._mpwdInlineSave('${type}','${obj._key}',document.getElementById('mpwd-inp-${obj._key}-${type}').value)"
+            style="background:#6366f1;color:#fff;border:none;border-radius:8px;padding:4px 10px;
+              font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;font-family:Sarabun,sans-serif;">
+            <i class="fas fa-save"></i>
+          </button>
+        </div>
+      </td>
+    </tr>`;
+  };
   mc.innerHTML=`<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
     ${card(`${sHead('รหัสผ่านหัวหน้างาน')}
     <input type="text" id="spwd-search" placeholder="ค้นหาชื่อ/username..." class="w-full border rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1" oninput="filterSupPwd(this.value)">
-    <div style="max-height:420px;overflow-y:auto;">
-    <table class="min-w-full text-sm">${THead('ชื่อ','Username','รหัสผ่าน')}
-    <tbody id="sup-pwd-tbody">${db.supervisors.map(supRows).join('')}</tbody></table></div>`)}
+    <div style="max-height:440px;overflow-y:auto;">
+    <table class="min-w-full text-sm">${THead('ชื่อ','Username','รหัสผ่าน (แก้ไขได้เลย)')}
+    <tbody id="sup-pwd-tbody">${db.supervisors.map(s=>mkRow('sup',s)).join('')}</tbody></table></div>`)}
     ${card(`${sHead('รหัสผ่านพนักงาน')}
     <input type="text" id="epwd-search" placeholder="ค้นหาชื่อ/username..." class="w-full border rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1" oninput="filterEmpPwd(this.value)">
-    <div style="max-height:420px;overflow-y:auto;">
-    <table class="min-w-full text-sm">${THead('ชื่อ','Username','รหัสผ่าน')}
-    <tbody id="emp-pwd-tbody">${db.employees.map(empRows2).join('')}</tbody></table></div>`)}
+    <div style="max-height:440px;overflow-y:auto;">
+    <table class="min-w-full text-sm">${THead('ชื่อ','Username','รหัสผ่าน (แก้ไขได้เลย)')}
+    <tbody id="emp-pwd-tbody">${db.employees.map(e=>mkRow('emp',e)).join('')}</tbody></table></div>`)}
   </div>`;
 }
 
-window._mpwdToggle = function(type, key, pwd) {
-  const valEl = document.getElementById(`mpwd-${type}-val-${key}`);
-  const eyeEl = document.getElementById(`mpwd-${type}-eye-${key}`);
-  if (!valEl) return;
-  if (valEl.textContent === '••••••') {
-    valEl.textContent = pwd || '(ไม่มี)'; valEl.style.color='#1d4ed8';
-    if(eyeEl) eyeEl.className='fas fa-eye-slash';
-  } else {
-    valEl.textContent = '••••••'; valEl.style.color='#1e293b';
-    if(eyeEl) eyeEl.className='fas fa-eye';
-  }
-};
-
-window._mpwdEdit = function(type, key, name) {
-  const curObj = type==='sup'
-    ? db.supervisors.find(s=>s._key===key)
-    : db.employees.find(e=>e._key===key);
-  if(!curObj) return;
-  openModal(`🔑 เปลี่ยนรหัสผ่าน — ${name}`,
-    `<div class="space-y-4">
-      <div style="background:#f8fafc;border-radius:10px;padding:12px 16px;font-size:13px;color:#475569;">
-        <i class="fas fa-${type==='sup'?'user-tie':'user'} mr-2 text-purple-500"></i><strong>${name}</strong>
-        <span style="margin-left:8px;color:#94a3b8;">@${curObj.username}</span>
-      </div>
-      <div>
-        <label class="text-sm font-medium text-gray-700 block mb-1">รหัสผ่านปัจจุบัน</label>
-        <div style="background:#f1f5f9;border-radius:8px;padding:10px 14px;font-family:monospace;font-size:14px;color:#1d4ed8;
-          display:flex;align-items:center;justify-content:space-between;">
-          <span id="_mpwd_cur_disp">••••••</span>
-          <button onclick="const el=document.getElementById('_mpwd_cur_disp');el.textContent=el.textContent==='••••••'?'${(curObj.password||'').replace(/'/g,"\\'")}':'••••••'"
-            style="background:none;border:none;cursor:pointer;color:#94a3b8;"><i class="fas fa-eye"></i></button>
-        </div>
-      </div>
-      <div>
-        <label class="text-sm font-medium text-gray-700 block mb-1">รหัสผ่านใหม่ <span class="text-red-500">*</span></label>
-        <input id="_mpwd_new_inp" type="text" placeholder="กรอกรหัสผ่านใหม่"
-          class="w-full border rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-purple-500 outline-none font-mono">
-      </div>
-      <div id="_mpwd_err" class="hidden text-sm text-red-600 bg-red-50 rounded-lg p-3 text-center"></div>
-    </div>`,
-    `<button onclick="window._mpwdSave('${type}','${key}')" class="flex-1 bg-purple-600 hover:bg-purple-700 text-white py-2.5 rounded-lg text-sm font-bold">
-      <i class="fas fa-save mr-1"></i>บันทึก</button>
-    <button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-4 py-2.5 rounded-lg text-sm font-medium">ยกเลิก</button>`
-  );
-  setTimeout(()=>document.getElementById('_mpwd_new_inp')?.focus(),100);
-};
-
-window._mpwdSave = async function(type, key) {
-  const newPwd = document.getElementById('_mpwd_new_inp')?.value?.trim();
-  const errEl  = document.getElementById('_mpwd_err');
-  if(!newPwd){if(errEl){errEl.textContent='กรุณากรอกรหัสผ่านใหม่';errEl.classList.remove('hidden');}return;}
-  if(newPwd.length<3){if(errEl){errEl.textContent='รหัสผ่านต้องมีอย่างน้อย 3 ตัว';errEl.classList.remove('hidden');}return;}
+window._mpwdInlineSave = async function(type, key, newPwd) {
+  newPwd=(newPwd||'').trim();
+  const inp=document.getElementById(`mpwd-inp-${key}-${type}`);
+  const row=document.getElementById(`mpwd-${type}-${key}`);
+  if(!newPwd){if(inp){inp.style.borderColor='#dc2626';}alert('กรุณากรอกรหัสผ่าน');return;}
+  if(inp) inp.style.borderColor='#f59e0b';
   showSync();
-  try {
-    const path = type==='sup' ? `/supervisors/${key}` : `/employees/${key}`;
-    await fbPatch(path, {password:newPwd});
-    if(type==='sup'){const idx=db.supervisors.findIndex(s=>s._key===key);if(idx>=0)db.supervisors[idx].password=newPwd;}
-    else{const idx=db.employees.findIndex(e=>e._key===key);if(idx>=0)db.employees[idx].password=newPwd;}
-    hideSync(); closeModal();
-    // อัพเดต display ถ้า visible
-    const valEl = document.getElementById(`mpwd-${type}-val-${key}`);
-    if(valEl && valEl.textContent!=='••••••') valEl.textContent = newPwd;
-    const row = document.getElementById(`mpwd-${type}-${key}`);
-    if(row){row.style.background='#dcfce7';setTimeout(()=>{row.style.background='';},1500);}
-  } catch(e){
+  try{
+    const path=type==='sup'?`/supervisors/${key}`:`/employees/${key}`;
+    await fbPatch(path,{password:newPwd});
+    if(type==='sup'){const i=db.supervisors.findIndex(s=>s._key===key);if(i>=0)db.supervisors[i].password=newPwd;}
+    else{const i=db.employees.findIndex(e=>e._key===key);if(i>=0)db.employees[i].password=newPwd;}
     hideSync();
-    if(errEl){errEl.textContent='บันทึกไม่สำเร็จ: '+e.message;errEl.classList.remove('hidden');}
-  }
+    if(inp){inp.value=newPwd;inp.style.borderColor='#22c55e';inp.style.background='#f0fdf4';}
+    if(row){row.style.background='#dcfce7';setTimeout(()=>{row.style.background='';if(inp){inp.style.borderColor='#e2e8f0';inp.style.background='#f8fafc';}},1500);}
+  }catch(e){hideSync();if(inp)inp.style.borderColor='#dc2626';alert('บันทึกไม่สำเร็จ: '+e.message);}
 };
 
-window.filterSupPwd = q => {
-  const tbody = document.getElementById('sup-pwd-tbody'); if(!tbody) return;
+window.filterSupPwd=q=>{
+  const tb=document.getElementById('sup-pwd-tbody');if(!tb)return;
   const ql=q.toLowerCase();
-  const filtered=db.supervisors.filter(s=>!q||s.name.toLowerCase().includes(ql)||s.username.toLowerCase().includes(ql));
-  tbody.innerHTML=filtered.map(s=>`<tr class="hover:bg-gray-50" id="mpwd-sup-${s._key}">
-    <td class="px-3 py-2.5 font-medium text-sm">${s.name}</td>
-    <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${s.username}</td>
-    <td class="px-3 py-2.5"><div style="display:flex;align-items:center;gap:5px;">
-      <span id="mpwd-sup-val-${s._key}" style="font-family:monospace;font-size:12px;color:#1e293b;min-width:60px;">••••••</span>
-      <button onclick="window._mpwdToggle('sup','${s._key}','${(s.password||'').replace(/'/g,"\\'")}') "style="background:none;border:none;cursor:pointer;color:#94a3b8;font-size:12px;padding:2px;"><i class="fas fa-eye" id="mpwd-sup-eye-${s._key}"></i></button>
-      <button onclick="window._mpwdEdit('sup','${s._key}','${s.name.replace(/'/g,"\\'")}')" style="background:#ede9fe;border:none;cursor:pointer;color:#7c3aed;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;font-family:Sarabun,sans-serif;"><i class="fas fa-edit" style="margin-right:3px;"></i>แก้ไข</button>
-    </div></td></tr>`).join('');
+  const mkRow=(type,obj)=>{
+    const safePwd=(obj.password||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+    return `<tr class="hover:bg-gray-50" id="mpwd-${type}-${obj._key}">
+      <td class="px-3 py-2.5 font-medium text-sm">${obj.name}</td>
+      <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${obj.username}</td>
+      <td class="px-3 py-2.5"><div style="display:flex;align-items:center;gap:6px;">
+        <input id="mpwd-inp-${obj._key}-${type}" type="text" value="${safePwd}"
+          style="border:1px solid #e2e8f0;border-radius:8px;padding:4px 10px;font-family:monospace;
+            font-size:12px;color:#1e293b;width:120px;outline:none;background:#f8fafc;"
+          onkeydown="if(event.key==='Enter')window._mpwdInlineSave('${type}','${obj._key}',this.value)">
+        <button onclick="window._mpwdInlineSave('${type}','${obj._key}',document.getElementById('mpwd-inp-${obj._key}-${type}').value)"
+          style="background:#6366f1;color:#fff;border:none;border-radius:8px;padding:4px 10px;
+            font-size:11px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;">
+          <i class="fas fa-save"></i></button>
+      </div></td></tr>`;
+  };
+  tb.innerHTML=db.supervisors.filter(s=>!q||s.name.toLowerCase().includes(ql)||s.username.toLowerCase().includes(ql))
+    .map(s=>mkRow('sup',s)).join('');
 };
-window.filterEmpPwd = q => {
-  const tbody = document.getElementById('emp-pwd-tbody'); if(!tbody) return;
+window.filterEmpPwd=q=>{
+  const tb=document.getElementById('emp-pwd-tbody');if(!tb)return;
   const ql=q.toLowerCase();
-  const filtered=db.employees.filter(e=>!q||e.name.toLowerCase().includes(ql)||e.username.toLowerCase().includes(ql));
-  tbody.innerHTML=filtered.map(e=>`<tr class="hover:bg-gray-50" id="mpwd-emp-${e._key}">
-    <td class="px-3 py-2.5 font-medium text-sm">${e.name}</td>
-    <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${e.username}</td>
-    <td class="px-3 py-2.5"><div style="display:flex;align-items:center;gap:5px;">
-      <span id="mpwd-emp-val-${e._key}" style="font-family:monospace;font-size:12px;color:#1e293b;min-width:60px;">••••••</span>
-      <button onclick="window._mpwdToggle('emp','${e._key}','${(e.password||'').replace(/'/g,"\\'")}') "style="background:none;border:none;cursor:pointer;color:#94a3b8;font-size:12px;padding:2px;"><i class="fas fa-eye" id="mpwd-emp-eye-${e._key}"></i></button>
-      <button onclick="window._mpwdEdit('emp','${e._key}','${e.name.replace(/'/g,"\\'")}')" style="background:#ede9fe;border:none;cursor:pointer;color:#7c3aed;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;font-family:Sarabun,sans-serif;"><i class="fas fa-edit" style="margin-right:3px;"></i>แก้ไข</button>
-    </div></td></tr>`).join('');
+  const mkRow=(type,obj)=>{
+    const safePwd=(obj.password||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+    return `<tr class="hover:bg-gray-50" id="mpwd-${type}-${obj._key}">
+      <td class="px-3 py-2.5 font-medium text-sm">${obj.name}</td>
+      <td class="px-3 py-2.5 font-mono text-blue-700 text-xs">${obj.username}</td>
+      <td class="px-3 py-2.5"><div style="display:flex;align-items:center;gap:6px;">
+        <input id="mpwd-inp-${obj._key}-${type}" type="text" value="${safePwd}"
+          style="border:1px solid #e2e8f0;border-radius:8px;padding:4px 10px;font-family:monospace;
+            font-size:12px;color:#1e293b;width:120px;outline:none;background:#f8fafc;"
+          onkeydown="if(event.key==='Enter')window._mpwdInlineSave('${type}','${obj._key}',this.value)">
+        <button onclick="window._mpwdInlineSave('${type}','${obj._key}',document.getElementById('mpwd-inp-${obj._key}-${type}').value)"
+          style="background:#6366f1;color:#fff;border:none;border-radius:8px;padding:4px 10px;
+            font-size:11px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;">
+          <i class="fas fa-save"></i></button>
+      </div></td></tr>`;
+  };
+  tb.innerHTML=db.employees.filter(e=>!q||e.name.toLowerCase().includes(ql)||e.username.toLowerCase().includes(ql))
+    .map(e=>mkRow('emp',e)).join('');
 };
+
 // =====================================================================
 function pgQR(){
   const mc=document.getElementById('main-content');
@@ -4723,8 +5111,8 @@ async function renderSupDashBody(dk){
   dk = dk || document.getElementById('sup-dash-date')?.value || todayStr;
   await loadAttendanceDate(dk);
   const sup=db.supervisors.find(s=>s._key===CU.id);
-  const recs=getAttendanceArray(dk).filter(r=>r.supId===CU.id);
-  const subs=db.employees.filter(e=>e.supId===CU.id);
+  const recs=getAttendanceArray(dk).filter(r=>recBelongsToCurrentSup(r));
+  const subs=db.employees.filter(e=>empBelongsToSup(e,CU.id));
   const tWage=recs.reduce((s,r)=>s+r.total,0);
 
   // คำนวณมาสาย
@@ -5023,7 +5411,7 @@ window.saveMyPwd=async function(){
 window.expDailyCSV=function(dk){
   const wb=XLSX.utils.book_new();
   let recs=getAttendanceArray(dk);
-  if(CU.role==='supervisor')recs=recs.filter(r=>r.supId===CU.id);
+  if(CU.role==='supervisor')recs=recs.filter(r=>recBelongsToCurrentSup(r));
 
   const calcHrs = (inT, outT) => {
     if (!inT || !outT) return '';
@@ -5077,7 +5465,7 @@ window.expMonthlyCSV=function(month){
   Object.entries(db.attendance).forEach(([k,bucket])=>{
     if(!k.startsWith(month))return;
     Object.values(bucket||{}).forEach(r=>{
-      if(isSup&&r.supId!==CU.id)return;
+      if(isSup&&!recBelongsToCurrentSup(r))return;
       if(!em[r.empId])em[r.empId]={empId:r.empId,empName:r.empName,dept:r.dept,sup:r.sup,
         days:0,otH:0,wage:0,otPay:0,total:0,outCount:0,totalWorkHrs:0};
       em[r.empId].days++;
@@ -5128,7 +5516,7 @@ window.expMonthlyCSV=function(month){
   Object.entries(db.attendance).sort().forEach(([dk,bucket])=>{
     if(!dk.startsWith(month))return;
     Object.values(bucket||{}).forEach(r=>{
-      if(isSup&&r.supId!==CU.id)return;
+      if(isSup&&!recBelongsToCurrentSup(r))return;
       data2.push([
         fmtThai(dk),
         r.empName, r.dept, r.sup,
@@ -6358,8 +6746,8 @@ async function refreshFaceSupPanel() {
   await loadAttendanceDate(todayStr);
   const supId = CU.role === 'supervisor' ? CU.id : null;
   const allRecs = getAttendanceArray(todayStr);
-  const recs = supId ? allRecs.filter(r => r.supId === supId) : allRecs;
-  const subs = supId ? db.employees.filter(e => e.supId === supId) : db.employees;
+  const recs = supId ? allRecs.filter(r => recBelongsToCurrentSup(r)) : allRecs;
+  const subs = supId ? db.employees.filter(e => empBelongsToSup(e, supId)) : db.employees;
 
   const presentIds = new Set(recs.map(r => r.empId));
   const absent = subs.filter(e => !presentIds.has(e._key));
@@ -6934,16 +7322,22 @@ window.loadSupRpt=async function(month){
   Object.entries(db.attendance).forEach(([k,bucket])=>{
     if(!k.startsWith(month))return;
     Object.values(bucket||{}).forEach(r=>{
-      if(!sd[r.supId])return;
-      sd[r.supId].empSet.add(r.empId);
-      sd[r.supId].days++;
-      sd[r.supId].tWage+=r.total;
-      sd[r.supId].tOt+=r.otPay;
-      if(!sd[r.supId].empData[r.empId]) sd[r.supId].empData[r.empId]={empId:r.empId,empName:r.empName,dept:r.dept,days:0,tWage:0,tOt:0,tTotal:0};
-      sd[r.supId].empData[r.empId].days++;
-      sd[r.supId].empData[r.empId].tWage+=r.wage;
-      sd[r.supId].empData[r.empId].tOt+=r.otPay;
-      sd[r.supId].empData[r.empId].tTotal+=r.total;
+      // resolve supKey: ใช้ r.supId ก่อน ถ้าไม่มีให้ค้นจากชื่อ r.sup
+      let supKey = r.supId && sd[r.supId] ? r.supId : null;
+      if (!supKey && r.sup) {
+        const matched = findSupFuzzy(r.sup);
+        if (matched && sd[matched._key]) supKey = matched._key;
+      }
+      if(!supKey)return;
+      sd[supKey].empSet.add(r.empId);
+      sd[supKey].days++;
+      sd[supKey].tWage+=r.total;
+      sd[supKey].tOt+=r.otPay;
+      if(!sd[supKey].empData[r.empId]) sd[supKey].empData[r.empId]={empId:r.empId,empName:r.empName,dept:r.dept,days:0,tWage:0,tOt:0,tTotal:0};
+      sd[supKey].empData[r.empId].days++;
+      sd[supKey].empData[r.empId].tWage+=r.wage;
+      sd[supKey].empData[r.empId].tOt+=r.otPay;
+      sd[supKey].empData[r.empId].tTotal+=r.total;
     });
   });
 
@@ -6952,7 +7346,7 @@ window.loadSupRpt=async function(month){
   area.innerHTML=`
     <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
     ${Object.values(sd).map(s=>{
-    const subs=db.employees.filter(e=>e.supId===s._key);
+    const subs=db.employees.filter(e=>empBelongsToSup(e,s._key));
     const empRows=Object.values(s.empData);
     const empDataJson=JSON.stringify(empRows).replace(/"/g,'&quot;');
     const supDataJson=JSON.stringify({name:s.name,dept:s.dept||'-',month:thMonth,tWage:s.tWage,tOt:s.tOt,days:s.days}).replace(/"/g,'&quot;');
@@ -8202,10 +8596,10 @@ window.renderOrgChart = function() {
   let sups = [...db.supervisors];
   if (q) sups = sups.filter(s =>
     s.name.toLowerCase().includes(q) ||
-    db.employees.some(e => e.supId === s._key && e.name.toLowerCase().includes(q))
+    db.employees.some(e => empBelongsToSup(e, s._key) && e.name.toLowerCase().includes(q))
   );
 
-  const supEmps = s => db.employees.filter(e => e.supId === s._key);
+  const supEmps = s => db.employees.filter(e => empBelongsToSup(e, s._key));
   const avgWage = s => { const es = supEmps(s); return es.length ? es.reduce((t,e)=>t+getEmpWage(e),0)/es.length : 0; };
 
   if (sort === 'wage-desc')   sups.sort((a,b) => avgWage(b)-avgWage(a));
