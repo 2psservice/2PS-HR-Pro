@@ -383,6 +383,7 @@ let db = {
   employees: [],
   departments: [],
   attendance: {},   // { 'YYYY-MM-DD': { firebaseKey: record } }
+  advances: {},     // { empId: [ { amount, date, note, _key } ] }
   wage: { defaultWage: 400, otRate: 75, workStart: '07:00', workEnd: '17:00' }
 };
 
@@ -419,6 +420,16 @@ async function initApp() {
       ? Object.entries(departments).map(([k, v]) => ({ _key: k, ...v })) : [];
     if (wage) db.wage = { ...db.wage, ...wage };
     if (admin) db.admin = { ...db.admin, ...admin };
+
+    // โหลด advances
+    const advRaw = await fbGet('/advances').catch(()=>null);
+    if (advRaw && typeof advRaw === 'object') {
+      db.advances = {};
+      Object.entries(advRaw).forEach(([empId, items]) => {
+        if (typeof items === 'object')
+          db.advances[empId] = Object.entries(items).map(([k,v])=>({_key:k,...v}));
+      });
+    }
 
     // Load check-in mode
     const ciMode = await fbGet('/settings/checkinMode');
@@ -2043,40 +2054,84 @@ function pgGpsTimeline() {
               font-family:Sarabun,sans-serif;color:#1e293b;outline:none;box-sizing:border-box;"
             onfocus="this.style.borderColor='#0d9488'" onblur="this.style.borderColor='#e2e8f0'">
         </div>
-        <div style="padding:6px 14px;font-size:11px;font-weight:700;color:#94a3b8;background:#f8fafc;border-bottom:1px solid #f1f5f9;flex-shrink:0;">
-          ทั้งหมด ${emps.length + sups.length} คน · badge = จำนวนจุด GPS วันนี้
+        <div style="padding:6px 14px;font-size:11px;font-weight:700;color:#94a3b8;background:#f8fafc;border-bottom:1px solid #f1f5f9;flex-shrink:0;" id="gtl-count-label">
+          ทั้งหมด ${emps.length + sups.length} คน · กำลังโหลด GPS...
         </div>
         <div style="flex:1;overflow-y:auto;" id="gtl-person-list">
-          ${sups.length ? `<div style="padding:6px 14px 3px;font-size:10px;font-weight:700;color:#7c3aed;text-transform:uppercase;letter-spacing:.5px;background:#faf5ff;border-bottom:1px solid #f3e8ff;">
-            <i class="fas fa-user-tie mr-1"></i>หัวหน้างาน (${sups.length})</div>
-            ${sups.map(s=>personCard(s,true)).join('')}` : ''}
-          ${emps.length ? `<div style="padding:6px 14px 3px;font-size:10px;font-weight:700;color:#0d9488;text-transform:uppercase;letter-spacing:.5px;background:#f0fdfa;border-bottom:1px solid #ccfbf1;">
-            <i class="fas fa-users mr-1"></i>พนักงาน (${emps.length})</div>
-            ${emps.map(e=>personCard(e,false)).join('')}` : ''}
+          <div style="padding:30px;text-align:center;color:#94a3b8;font-size:13px;">
+            <div class="loading-spinner" style="width:24px;height:24px;border-width:3px;margin:0 auto 8px;border-top-color:#0d9488;"></div>
+            กำลังโหลดข้อมูล GPS...
+          </div>
         </div>
       </div>
 
     </div>`;
 
-  _gtlLoadBadges(todayStr);
+  _gtlLoadBadgesAndSort(todayStr);
 }
 
-async function _gtlLoadBadges(dk) {
-  const all = [...db.employees.map(e=>e._key), ...db.supervisors.map(s=>s._key)];
-  for (const id of all) {
-    const raw = await fbGet('/liveTrackHistory/'+id).catch(()=>null);
-    if (!raw) continue;
-    const cnt = Object.values(raw).filter(p=>p.ts && new Date(p.ts).toISOString().slice(0,10)===dk).length;
-    const badge = document.getElementById('gtl-badge-'+id);
-    if (badge) badge.innerHTML = cnt>0
-      ? `<span style="background:#0d9488;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;">${cnt}</span>` : '';
+// โหลด GPS count ทุกคน แล้วเรียงรายชื่อตาม count มากสุดก่อน และ render
+async function _gtlLoadBadgesAndSort(dk) {
+  const allPersons = [
+    ...db.employees.map(e  => ({ id:e._key, name:e.name, dept:e.dept||'', isSup:0 })),
+    ...db.supervisors.map(s => ({ id:s._key, name:s.name, dept:s.dept||'', isSup:1 })),
+  ];
+
+  // โหลด GPS count พร้อมกันทุกคน
+  const counts = await Promise.all(
+    allPersons.map(async p => {
+      try {
+        const raw = await fbGet('/liveTrackHistory/'+p.id).catch(()=>null);
+        const cnt = raw ? Object.values(raw).filter(pt=>pt.ts && new Date(pt.ts).toISOString().slice(0,10)===dk).length : 0;
+        return { ...p, cnt };
+      } catch(_) { return { ...p, cnt:0 }; }
+    })
+  );
+
+  // เรียงตาม count มากสุดก่อน → ชื่อ ก-ฮ
+  counts.sort((a,b) => b.cnt - a.cnt || a.name.localeCompare(b.name,'th'));
+
+  // Re-render person list
+  const listWrap = document.getElementById('gtl-person-list');
+  if (!listWrap) return;
+
+  function personCardSorted(p) {
+    const col = p.isSup ? 'linear-gradient(135deg,#7c3aed,#6d28d9)' : 'linear-gradient(135deg,#0d9488,#0f766e)';
+    return `<div class="gtl-person-card" data-id="${p.id}"
+      onclick="_gtlSelectPerson('${p.id}',${p.isSup})"
+      style="display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer;
+        border-bottom:1px solid #f1f5f9;transition:all .12s;border-left:3px solid transparent;"
+      onmouseover="if(!this.classList.contains('gtl-active')){this.style.background='#f0fdfa';this.style.borderLeftColor='#0d9488';}"
+      onmouseout="if(!this.classList.contains('gtl-active')){this.style.background='';this.style.borderLeftColor='transparent';}">
+      <div style="width:34px;height:34px;border-radius:50%;background:${col};
+        display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">
+        ${p.isSup?'👔':'👤'}
+      </div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${p.name}</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:1px;">${p.dept||'-'}</div>
+      </div>
+      <div id="gtl-badge-${p.id}">
+        ${p.cnt>0
+          ? `<span style="background:#0d9488;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;">${p.cnt}</span>`
+          : `<span style="background:#f1f5f9;color:#cbd5e1;font-size:10px;padding:2px 7px;border-radius:10px;">0</span>`}
+      </div>
+    </div>`;
+  }
+
+  listWrap.innerHTML = counts.map(personCardSorted).join('');
+
+  // update count label
+  const countLabel = document.getElementById('gtl-count-label');
+  if (countLabel) {
+    const withGps = counts.filter(p=>p.cnt>0).length;
+    countLabel.textContent = `ทั้งหมด ${counts.length} คน · มี GPS ${withGps} คน`;
   }
 }
 
 window._gtlOnDateChange = function() {
   const dk = document.getElementById('gtl-date')?.value; if(!dk) return;
-  document.querySelectorAll('[id^="gtl-badge-"]').forEach(el=>el.innerHTML='');
-  _gtlLoadBadges(dk);
+  _gtlLoadBadgesAndSort(dk);
   if (window._gtlSelectedId) _gtlSelectPerson(window._gtlSelectedId, window._gtlSelectedIsSup);
 };
 
@@ -2747,7 +2802,7 @@ function pgEmps(filterSupKey=''){
     <button onclick="downloadEmpTemplate()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg text-sm flex items-center gap-1.5 border"><i class="fas fa-download text-green-600"></i>Template</button>
     <label class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg text-sm flex items-center gap-1.5 cursor-pointer shadow-sm"><i class="fas fa-upload"></i>Import Excel<input type="file" accept=".xlsx,.xls" style="display:none" onchange="importEmpExcel(this)"></label>`:''}
     ${Btn('<i class="fas fa-plus mr-1"></i>เพิ่มพนักงาน','openEmpMod(null)')}</div>`)
-    +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','เบอร์','สายงาน','หัวหน้างาน','ค่าแรง','OT/ชม.','Username','รหัสผ่าน','จัดการ')}
+    +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','เบอร์','สายงาน','หัวหน้างาน','ค่าแรง','OT/ชม.','Username','รหัสผ่าน','<span style="color:#dc2626;">เบิกล่วงหน้า</span>','จัดการ')}
     <tbody id="emp-tbody">${empRows(emps)}</tbody></table></div>`);
 }
 
@@ -3072,6 +3127,210 @@ window.doImportEmp = async function() {
   const newSupCount = Object.keys(supKeyMap).length;
   alert(`✅ นำเข้าสำเร็จ\n👤 พนักงาน ${done} คน${newSupCount ? '\n👔 สร้างหัวหน้างานใหม่ ' + newSupCount + ' คน' : ''}`);
 };
+// =====================================================================
+//  ADVANCE PAYMENT — เบิกล่วงหน้า
+// =====================================================================
+
+// คืนรายการเบิกล่วงหน้าของพนักงานคนนี้ (เดือน YYYY-MM หรือทั้งหมด)
+function getEmpAdvances(empId, month) {
+  const list = db.advances[empId] || [];
+  if (!month) return list;
+  return list.filter(a => (a.date||'').startsWith(month));
+}
+
+// รวมยอดเบิกล่วงหน้า (เดือน YYYY-MM หรือทั้งหมด)
+function sumAdvances(empId, month) {
+  return getEmpAdvances(empId, month).reduce((s,a)=>s+(a.amount||0), 0);
+}
+
+// เปิด modal เบิกล่วงหน้า
+window.openAdvanceModal = function(empId) {
+  const emp = db.employees.find(e=>e._key===empId);
+  if (!emp) return;
+  const list = (db.advances[empId]||[]).sort((a,b)=>b.date.localeCompare(a.date));
+  const total = list.reduce((s,a)=>s+(a.amount||0),0);
+  const wage  = emp.wage || db.wage.defaultWage;
+
+  const rows = list.length === 0
+    ? `<tr><td colspan="5" style="text-align:center;padding:24px;color:#94a3b8;font-size:13px;">ยังไม่มีรายการเบิกล่วงหน้า</td></tr>`
+    : list.map(a=>`<tr style="border-bottom:1px solid #f1f5f9;transition:background .1s;" onmouseover="this.style.background='#fff5f5'" onmouseout="this.style.background=''">
+        <td style="padding:10px 12px;font-family:monospace;font-size:13px;color:#1e293b;">${a.date||'-'}</td>
+        <td style="padding:10px 12px;text-align:right;">
+          <input type="number" value="${a.amount||0}" min="0"
+            id="adv-edit-amt-${a._key}"
+            style="width:90px;border:1.5px solid #fca5a5;border-radius:8px;padding:4px 8px;font-size:13px;font-weight:700;color:#dc2626;text-align:right;font-family:Sarabun,sans-serif;outline:none;background:#fff5f5;"
+            onfocus="this.style.borderColor='#ef4444';this.style.background='#fff'"
+            onblur="this.style.borderColor='#fca5a5';this.style.background='#fff5f5'"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();saveAdvanceEdit('${empId}','${a._key}',this.value);}">
+        </td>
+        <td style="padding:10px 12px;">
+          <input type="text" value="${a.note||''}" placeholder="หมายเหตุ"
+            id="adv-edit-note-${a._key}"
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:8px;padding:4px 8px;font-size:12px;color:#475569;font-family:Sarabun,sans-serif;outline:none;background:#f8fafc;box-sizing:border-box;"
+            onfocus="this.style.borderColor='#94a3b8';this.style.background='#fff'"
+            onblur="this.style.borderColor='#e2e8f0';this.style.background='#f8fafc'"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();saveAdvanceEdit('${empId}','${a._key}',document.getElementById('adv-edit-amt-${a._key}').value,this.value);}">
+        </td>
+        <td style="padding:10px 12px;text-align:center;">
+          <button onclick="saveAdvanceEdit('${empId}','${a._key}',document.getElementById('adv-edit-amt-${a._key}').value,document.getElementById('adv-edit-note-${a._key}').value)"
+            style="background:#6366f1;color:#fff;border:none;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;font-family:Sarabun,sans-serif;font-weight:600;">💾</button>
+        </td>
+        <td style="padding:10px 12px;text-align:center;">
+          <button onclick="delAdvance('${empId}','${a._key}')"
+            style="background:#fee2e2;color:#dc2626;border:1px solid #fca5a5;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;font-family:Sarabun,sans-serif;font-weight:600;">ลบ</button>
+        </td>
+      </tr>`).join('');
+
+  const net = wage - total;
+  const body = `
+    <!-- Summary cards -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px;">
+      <div style="background:#fff5f5;border:1.5px solid #fca5a5;border-radius:12px;padding:12px 14px;text-align:center;">
+        <div style="font-size:10px;font-weight:700;color:#dc2626;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">เบิกล่วงหน้ารวม</div>
+        <div style="font-size:22px;font-weight:800;color:#dc2626;">฿${total.toLocaleString()}</div>
+      </div>
+      <div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:12px;padding:12px 14px;text-align:center;">
+        <div style="font-size:10px;font-weight:700;color:#16a34a;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">ค่าแรง/วัน</div>
+        <div style="font-size:22px;font-weight:800;color:#16a34a;">฿${wage.toLocaleString()}</div>
+      </div>
+      <div style="background:${net<0?'#fff5f5':'#eff6ff'};border:1.5px solid ${net<0?'#fca5a5':'#93c5fd'};border-radius:12px;padding:12px 14px;text-align:center;">
+        <div style="font-size:10px;font-weight:700;color:${net<0?'#dc2626':'#1d4ed8'};text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">คงเหลือ/วัน</div>
+        <div style="font-size:22px;font-weight:800;color:${net<0?'#dc2626':'#1d4ed8'};">฿${net.toLocaleString()}</div>
+      </div>
+    </div>
+
+    <!-- Add form -->
+    <div style="background:linear-gradient(135deg,#fff5f5,#fef2f2);border:1.5px solid #fca5a5;border-radius:12px;padding:14px 16px;margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:700;color:#991b1b;margin-bottom:10px;">
+        <i class="fas fa-plus-circle" style="margin-right:6px;"></i>เพิ่มรายการเบิกใหม่
+      </div>
+      <div style="display:grid;grid-template-columns:140px 120px 1fr auto;gap:8px;align-items:end;">
+        <div>
+          <div style="font-size:11px;color:#64748b;margin-bottom:4px;font-weight:600;">📅 วันที่เบิก</div>
+          <input type="date" id="adv-date" value="${todayStr}"
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:8px;padding:8px 10px;font-size:13px;font-family:Sarabun,sans-serif;outline:none;box-sizing:border-box;background:#fff;"
+            onfocus="this.style.borderColor='#ef4444'" onblur="this.style.borderColor='#e2e8f0'">
+        </div>
+        <div>
+          <div style="font-size:11px;color:#64748b;margin-bottom:4px;font-weight:600;">💰 จำนวนเงิน (฿)</div>
+          <input type="number" id="adv-amount" placeholder="0" min="0" step="50"
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:8px;padding:8px 10px;font-size:14px;font-weight:700;color:#dc2626;text-align:right;font-family:Sarabun,sans-serif;outline:none;box-sizing:border-box;background:#fff;"
+            onfocus="this.style.borderColor='#ef4444';this.style.background='#fff'"
+            onblur="this.style.borderColor='#e2e8f0'"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addAdvance('${empId}');}">
+        </div>
+        <div>
+          <div style="font-size:11px;color:#64748b;margin-bottom:4px;font-weight:600;">📝 หมายเหตุ</div>
+          <input type="text" id="adv-note" placeholder="เช่น ค่าใช้จ่ายฉุกเฉิน, เบิกล่วงหน้า..."
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:8px;padding:8px 10px;font-size:13px;font-family:Sarabun,sans-serif;outline:none;box-sizing:border-box;background:#fff;"
+            onfocus="this.style.borderColor='#ef4444'" onblur="this.style.borderColor='#e2e8f0'"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addAdvance('${empId}');}">
+        </div>
+        <button onclick="addAdvance('${empId}')"
+          style="background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;border:none;border-radius:8px;padding:9px 18px;font-size:14px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;white-space:nowrap;box-shadow:0 2px 8px rgba(220,38,38,.3);">
+          <i class="fas fa-plus mr-1"></i>บันทึก
+        </button>
+      </div>
+      <!-- Quick amount buttons -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
+        <div style="font-size:11px;color:#94a3b8;align-self:center;">เบิกด่วน:</div>
+        ${[500,1000,1500,2000,3000,5000].map(n=>`
+          <button onclick="document.getElementById('adv-amount').value=${n}"
+            style="background:#fff;border:1px solid #fca5a5;border-radius:8px;padding:4px 12px;font-size:12px;font-weight:700;color:#dc2626;cursor:pointer;font-family:Sarabun,sans-serif;transition:all .1s;"
+            onmouseover="this.style.background='#fee2e2'" onmouseout="this.style.background='#fff'">
+            ฿${n.toLocaleString()}
+          </button>`).join('')}
+      </div>
+    </div>
+
+    <!-- History table -->
+    <div style="font-size:12px;font-weight:700;color:#374151;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;">
+      <span><i class="fas fa-history" style="margin-right:5px;color:#94a3b8;"></i>ประวัติการเบิก (${list.length} รายการ)</span>
+      <span style="font-size:11px;color:#94a3b8;">แก้ไขตัวเลขแล้วกด 💾 หรือ Enter เพื่อบันทึก</span>
+    </div>
+    <div style="overflow-x:auto;max-height:280px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:12px;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead style="background:#f8fafc;position:sticky;top:0;border-bottom:2px solid #e2e8f0;">
+          <tr>
+            <th style="padding:9px 12px;text-align:left;font-size:11px;font-weight:700;color:#64748b;white-space:nowrap;">วันที่</th>
+            <th style="padding:9px 12px;text-align:right;font-size:11px;font-weight:700;color:#dc2626;">จำนวนเงิน (฿)</th>
+            <th style="padding:9px 12px;text-align:left;font-size:11px;font-weight:700;color:#64748b;">หมายเหตุ</th>
+            <th style="padding:9px 12px;text-align:center;font-size:11px;font-weight:700;color:#6366f1;">บันทึก</th>
+            <th style="padding:9px 12px;text-align:center;font-size:11px;font-weight:700;color:#dc2626;">ลบ</th>
+          </tr>
+        </thead>
+        <tbody id="adv-tbody">${rows}</tbody>
+      </table>
+    </div>`;
+
+  openModal(`💸 เบิกล่วงหน้า — ${emp.name}`, body,
+    `<button onclick="closeModal()" class="bg-gray-100 text-gray-600 px-5 py-2.5 rounded-lg text-sm font-medium">ปิด</button>`);
+  // focus amount field
+  setTimeout(()=>document.getElementById('adv-amount')?.focus(), 150);
+};
+
+window.addAdvance = async function(empId) {
+  const date   = document.getElementById('adv-date')?.value;
+  const amount = parseInt(document.getElementById('adv-amount')?.value)||0;
+  const note   = document.getElementById('adv-note')?.value?.trim()||'';
+  if (!date || amount <= 0) return alert('กรุณากรอกวันที่และจำนวนเงินให้ถูกต้อง');
+  showSync();
+  try {
+    const res = await fbPush('/advances/'+empId, { date, amount, note });
+    if (!db.advances[empId]) db.advances[empId] = [];
+    db.advances[empId].push({ _key: res.name, date, amount, note });
+    hideSync();
+    openAdvanceModal(empId);
+    _refreshAdvBadge(empId);
+  } catch(e) { hideSync(); alert('บันทึกไม่สำเร็จ: '+e.message); }
+};
+
+window.saveAdvanceEdit = async function(empId, advKey, newAmt, newNote) {
+  const amount = parseInt(newAmt)||0;
+  const note   = (newNote||document.getElementById('adv-edit-note-'+advKey)?.value||'').trim();
+  if (amount < 0) return;
+  showSync();
+  try {
+    await fbPatch('/advances/'+empId+'/'+advKey, { amount, note });
+    const idx = (db.advances[empId]||[]).findIndex(a=>a._key===advKey);
+    if (idx>=0) { db.advances[empId][idx].amount=amount; db.advances[empId][idx].note=note; }
+    hideSync();
+    // flash row green
+    const amtEl = document.getElementById('adv-edit-amt-'+advKey);
+    if (amtEl) { amtEl.style.borderColor='#22c55e'; amtEl.style.background='#f0fdf4'; setTimeout(()=>{amtEl.style.borderColor='#fca5a5';amtEl.style.background='#fff5f5';},1200); }
+    _refreshAdvBadge(empId);
+    // refresh summary cards without closing modal
+    openAdvanceModal(empId);
+  } catch(e) { hideSync(); alert('บันทึกไม่สำเร็จ: '+e.message); }
+};
+
+window.delAdvance = async function(empId, advKey) {
+  if (!confirm('ลบรายการนี้?')) return;
+  showSync();
+  try {
+    await fbPatch('/advances/'+empId+'/'+advKey, null);
+    if (db.advances[empId]) db.advances[empId] = db.advances[empId].filter(a=>a._key!==advKey);
+    hideSync();
+    openAdvanceModal(empId);
+    _refreshAdvBadge(empId);
+  } catch(e) { hideSync(); alert('ลบไม่สำเร็จ: '+e.message); }
+};
+
+function _refreshAdvBadge(empId) {
+  const cell = document.getElementById('adv-cell-'+empId);
+  if (!cell) return;
+  const total = sumAdvances(empId);
+  cell.innerHTML = total > 0
+    ? `<button onclick="openAdvanceModal('${empId}')"
+        style="background:#fee2e2;color:#dc2626;border:1px solid #fca5a5;border-radius:8px;padding:3px 10px;font-size:12px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;">
+        ฿${total.toLocaleString()}
+      </button>`
+    : `<button onclick="openAdvanceModal('${empId}')"
+        style="background:#f1f5f9;color:#94a3b8;border:1px solid #e2e8f0;border-radius:8px;padding:3px 10px;font-size:12px;cursor:pointer;font-family:Sarabun,sans-serif;">
+        + เบิก
+      </button>`;
+}
+
 function empRows(emps){
   return emps.length===0?EmptyR(10):emps.map(e=>`<tr class="hover:bg-gray-50" id="emp-row-${e._key}">
     <td class="px-4 py-2 font-mono text-xs text-gray-400">${e._key}</td>
@@ -3106,6 +3365,20 @@ function empRows(emps){
             font-size:14px;cursor:pointer;flex-shrink:0;transition:background .15s;"
           onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">💾</button>
       </div>
+    </td>
+    <td class="px-4 py-2" id="adv-cell-${e._key}" style="min-width:110px;">
+      ${(()=>{
+        const total = sumAdvances(e._key);
+        return total > 0
+          ? `<button onclick="openAdvanceModal('${e._key}')"
+              style="background:#fee2e2;color:#dc2626;border:1px solid #fca5a5;border-radius:8px;padding:3px 10px;font-size:12px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;">
+              ฿${total.toLocaleString()}
+            </button>`
+          : `<button onclick="openAdvanceModal('${e._key}')"
+              style="background:#f1f5f9;color:#94a3b8;border:1px solid #e2e8f0;border-radius:8px;padding:3px 10px;font-size:12px;cursor:pointer;font-family:Sarabun,sans-serif;">
+              + เบิก
+            </button>`;
+      })()}
     </td>
     <td class="px-4 py-2 flex gap-2">
       <button onclick="openEmpMod('${e._key}')" class="text-blue-600 text-xs hover:underline">\u0e41\u0e01\u0e49\u0e44\u0e02</button>
@@ -3620,20 +3893,26 @@ async function _renderAttendanceLog(dk) {
 
     <!-- Summary cards -->
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-bottom:16px;">
-      ${[
-        {icon:'fa-user-check', label:'เข้างาน',     val: total+' คน',          col:'#16a34a', bg:'#f0fdf4', bc:'#bbf7d0'},
-        {icon:'fa-check',      label:'ตรงเวลา',     val: onTimeN+' คน',         col:'#2563eb', bg:'#eff6ff', bc:'#bfdbfe'},
-        {icon:'fa-clock',      label:'มาสาย',       val: lateN+' คน',           col:'#dc2626', bg:'#fef2f2', bc:'#fecaca'},
-        {icon:'fa-hourglass',  label:'OT รวม',      val: tOTH.toFixed(1)+' ชม.',col:'#7c3aed', bg:'#f5f3ff', bc:'#e9d5ff'},
-        {icon:'fa-coins',      label:'ค่าแรงรวม',   val:'฿'+tWage.toLocaleString(), col:'#ca8a04', bg:'#fefce8', bc:'#fde68a'},
-        {icon:'fa-money-bill', label:'รวมทั้งสิ้น', val:'฿'+tTotal.toLocaleString(),col:'#0891b2', bg:'#ecfeff', bc:'#a5f3fc'},
-      ].map(s=>`
-        <div style="background:${s.bg};border:1.5px solid ${s.bc};border-radius:14px;padding:14px 16px;">
-          <div style="font-size:10px;font-weight:700;color:${s.col};text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">
-            <i class="fas ${s.icon}" style="margin-right:4px;"></i>${s.label}
-          </div>
-          <div style="font-size:18px;font-weight:800;color:#1e293b;">${s.val}</div>
-        </div>`).join('')}
+      ${(()=>{
+        const tAdv = recs.reduce((s,r)=>s+sumAdvances(r.empId),0);
+        const tNet = tTotal - tAdv;
+        return [
+          {icon:'fa-user-check', label:'เข้างาน',        val: total+' คน',              col:'#16a34a', bg:'#f0fdf4', bc:'#bbf7d0'},
+          {icon:'fa-check',      label:'ตรงเวลา',         val: onTimeN+' คน',             col:'#2563eb', bg:'#eff6ff', bc:'#bfdbfe'},
+          {icon:'fa-clock',      label:'มาสาย',           val: lateN+' คน',               col:'#dc2626', bg:'#fef2f2', bc:'#fecaca'},
+          {icon:'fa-hourglass',  label:'OT รวม',          val: tOTH.toFixed(1)+' ชม.',    col:'#7c3aed', bg:'#f5f3ff', bc:'#e9d5ff'},
+          {icon:'fa-coins',      label:'ค่าแรงรวม',       val:'฿'+tWage.toLocaleString(),  col:'#ca8a04', bg:'#fefce8', bc:'#fde68a'},
+          {icon:'fa-money-bill', label:'รวมทั้งสิ้น',    val:'฿'+tTotal.toLocaleString(), col:'#0891b2', bg:'#ecfeff', bc:'#a5f3fc'},
+          {icon:'fa-hand-holding-usd', label:'เบิกล่วงหน้า', val:'฿'+tAdv.toLocaleString(), col:'#dc2626', bg:'#fff5f5', bc:'#fca5a5'},
+          {icon:'fa-wallet',     label:'คงเหลือสุทธิ',   val:'฿'+tNet.toLocaleString(),  col: tNet<0?'#dc2626':'#16a34a', bg: tNet<0?'#fff5f5':'#f0fdf4', bc: tNet<0?'#fca5a5':'#86efac'},
+        ].map(s=>`
+          <div style="background:${s.bg};border:1.5px solid ${s.bc};border-radius:14px;padding:14px 16px;">
+            <div style="font-size:10px;font-weight:700;color:${s.col};text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">
+              <i class="fas ${s.icon}" style="margin-right:4px;"></i>${s.label}
+            </div>
+            <div style="font-size:18px;font-weight:800;color:#1e293b;">${s.val}</div>
+          </div>`).join('');
+      })()}
     </div>
 
     <!-- มาสาย banner -->
@@ -3645,7 +3924,7 @@ async function _renderAttendanceLog(dk) {
         <table class="min-w-full text-sm" id="alog-table">
           <thead style="background:#f8fafc;border-bottom:2px solid #e2e8f0;">
             <tr>
-              ${['#','ชื่อพนักงาน','สายงาน','หัวหน้างาน','เข้างาน','ออกงาน','สถานะ','OT (ชม.)','ค่าแรง','ค่า OT','รวม','GPS','วิธี']
+              ${['#','ชื่อพนักงาน','สายงาน','หัวหน้างาน','เข้างาน','ออกงาน','สถานะ','OT (ชม.)','ค่าแรง','ค่า OT','รวม','<span style="color:#dc2626">เบิกล่วงหน้า</span>','คงเหลือ','GPS','วิธี']
                 .map(h=>`<th style="padding:10px 14px;text-align:left;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;">${h}</th>`).join('')}
             </tr>
           </thead>
@@ -3654,11 +3933,17 @@ async function _renderAttendanceLog(dk) {
           </tbody>
           <tfoot style="background:#f1f5f9;border-top:2px solid #e2e8f0;">
             <tr id="alog-tfoot">
-              <td colspan="8" style="padding:10px 14px;font-weight:700;font-size:13px;color:#475569;">รวม ${total} รายการ</td>
-              <td style="padding:10px 14px;font-weight:800;color:#16a34a;font-size:13px;">฿${tWage.toLocaleString()}</td>
-              <td style="padding:10px 14px;font-weight:800;color:#7c3aed;font-size:13px;">฿${tOT.toLocaleString()}</td>
-              <td style="padding:10px 14px;font-weight:800;color:#1d4ed8;font-size:13px;">฿${tTotal.toLocaleString()}</td>
-              <td colspan="2"></td>
+              ${(()=>{
+                const tAdv = recs.reduce((s,r)=>s+sumAdvances(r.empId),0);
+                const tNet = tTotal - tAdv;
+                return `<td colspan="8" style="padding:10px 14px;font-weight:700;font-size:13px;color:#475569;">รวม ${total} รายการ</td>
+                <td style="padding:10px 14px;font-weight:800;color:#16a34a;font-size:13px;">฿${tWage.toLocaleString()}</td>
+                <td style="padding:10px 14px;font-weight:800;color:#7c3aed;font-size:13px;">฿${tOT.toLocaleString()}</td>
+                <td style="padding:10px 14px;font-weight:800;color:#1d4ed8;font-size:13px;">฿${tTotal.toLocaleString()}</td>
+                <td style="padding:10px 14px;font-weight:800;color:#dc2626;font-size:13px;">฿${tAdv.toLocaleString()}</td>
+                <td style="padding:10px 14px;font-weight:800;font-size:13px;color:${tNet<0?'#dc2626':'#16a34a'};">฿${tNet.toLocaleString()}</td>
+                <td colspan="2"></td>`;
+              })()}
             </tr>
           </tfoot>
         </table>
@@ -3672,9 +3957,11 @@ async function _renderAttendanceLog(dk) {
 }
 
 function _buildAlogRows(recs) {
-  if (!recs.length) return `<tr><td colspan="13" style="padding:32px;text-align:center;color:#94a3b8;font-size:14px;"><i class="fas fa-inbox" style="font-size:28px;margin-bottom:10px;display:block;"></i>ไม่มีข้อมูลการเข้างาน</td></tr>`;
+  if (!recs.length) return `<tr><td colspan="15" style="padding:32px;text-align:center;color:#94a3b8;font-size:14px;"><i class="fas fa-inbox" style="font-size:28px;margin-bottom:10px;display:block;"></i>ไม่มีข้อมูลการเข้างาน</td></tr>`;
   return recs.map((r, i) => {
     const methodIcon = r.checkInMethod==='face' ? '😊' : r.checkInMethod==='gps_button' ? '📍' : '📱';
+    const advAmt = sumAdvances(r.empId);
+    const net    = r.total - advAmt;
     return `<tr style="border-bottom:1px solid #f1f5f9;transition:background .1s;${r._late?'background:#fff7f7;':''}"
       onmouseover="this.style.background='${r._late?'#fef2f2':'#f8fafc'}'"
       onmouseout="this.style.background='${r._late?'#fff7f7':''}'">
@@ -3693,6 +3980,8 @@ function _buildAlogRows(recs) {
       <td style="padding:10px 14px;text-align:right;font-weight:700;color:#16a34a;">฿${r.wage.toLocaleString()}</td>
       <td style="padding:10px 14px;text-align:right;font-weight:700;color:#7c3aed;">฿${(r.otPay||0).toLocaleString()}</td>
       <td style="padding:10px 14px;text-align:right;font-weight:800;color:#1d4ed8;">฿${r.total.toLocaleString()}</td>
+      <td style="padding:10px 14px;text-align:right;font-weight:700;color:#dc2626;">${advAmt>0?'฿'+advAmt.toLocaleString():'-'}</td>
+      <td style="padding:10px 14px;text-align:right;font-weight:800;color:${net<0?'#dc2626':'#16a34a'};">฿${net.toLocaleString()}</td>
       <td style="padding:10px 14px;text-align:center;">
         ${r.gpsOk
           ? '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">✓</span>'
@@ -3740,14 +4029,18 @@ window._alogFilter = function() {
   if (tbody) tbody.innerHTML = _buildAlogRows(recs);
   const tfoot = document.getElementById('alog-tfoot');
   if (tfoot) {
-    const tW = recs.reduce((s,r)=>s+r.wage,0);
-    const tO = recs.reduce((s,r)=>s+r.otPay,0);
-    const tT = recs.reduce((s,r)=>s+r.total,0);
+    const tW   = recs.reduce((s,r)=>s+r.wage,0);
+    const tO   = recs.reduce((s,r)=>s+r.otPay,0);
+    const tT   = recs.reduce((s,r)=>s+r.total,0);
+    const tAdv = recs.reduce((s,r)=>s+sumAdvances(r.empId),0);
+    const tNet = tT - tAdv;
     tfoot.innerHTML = `
       <td colspan="8" style="padding:10px 14px;font-weight:700;font-size:13px;color:#475569;">รวม ${recs.length} รายการ</td>
       <td style="padding:10px 14px;font-weight:800;color:#16a34a;font-size:13px;">฿${tW.toLocaleString()}</td>
       <td style="padding:10px 14px;font-weight:800;color:#7c3aed;font-size:13px;">฿${tO.toLocaleString()}</td>
       <td style="padding:10px 14px;font-weight:800;color:#1d4ed8;font-size:13px;">฿${tT.toLocaleString()}</td>
+      <td style="padding:10px 14px;font-weight:800;color:#dc2626;font-size:13px;">฿${tAdv.toLocaleString()}</td>
+      <td style="padding:10px 14px;font-weight:800;font-size:13px;color:${tNet<0?'#dc2626':'#16a34a'};">฿${tNet.toLocaleString()}</td>
       <td colspan="2"></td>`;
   }
   _renderAlogLateBanner(recs.filter(r=>r._late));
@@ -3757,20 +4050,24 @@ window._alogExport = function(dk) {
   const recs = window._alogAllRecs || [];
   const ws_data = [
     ['บันทึกการเข้างาน — ' + dk],
-    ['ชื่อพนักงาน','สายงาน','หัวหน้างาน','เวลาเข้า','เวลาออก','สถานะ','สาย (นาที)','OT (ชม.)','ค่าแรง','ค่า OT','รวม','GPS','วิธี'],
-    ...recs.map(r => [
-      r.empName, r.dept||'-', r.sup||'-',
-      r.checkInTime, r.checkOutTime||'-',
-      r._late ? `สาย ${r._minutesLate} นาที` : 'ตรงเวลา',
-      r._late ? r._minutesLate : 0,
-      r.otHours||0, r.wage, r.otPay||0, r.total,
-      r.gpsOk ? 'ใน' : 'นอก',
-      r.checkInMethod||'qr'
-    ])
+    ['ชื่อพนักงาน','สายงาน','หัวหน้างาน','เวลาเข้า','เวลาออก','สถานะ','สาย (นาที)','OT (ชม.)','ค่าแรง','ค่า OT','รวม','เบิกล่วงหน้า','คงเหลือ','GPS','วิธี'],
+    ...recs.map(r => {
+      const adv = sumAdvances(r.empId);
+      return [
+        r.empName, r.dept||'-', r.sup||'-',
+        r.checkInTime, r.checkOutTime||'-',
+        r._late ? `สาย ${r._minutesLate} นาที` : 'ตรงเวลา',
+        r._late ? r._minutesLate : 0,
+        r.otHours||0, r.wage, r.otPay||0, r.total,
+        adv, r.total - adv,
+        r.gpsOk ? 'ใน' : 'นอก',
+        r.checkInMethod||'qr'
+      ];
+    })
   ];
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(ws_data);
-  ws['!cols'] = [{wch:22},{wch:14},{wch:18},{wch:10},{wch:10},{wch:14},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:8},{wch:8}];
+  ws['!cols'] = [{wch:22},{wch:14},{wch:18},{wch:10},{wch:10},{wch:14},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:12},{wch:12},{wch:8},{wch:8}];
   XLSX.utils.book_append_sheet(wb, ws, 'บันทึกเข้างาน');
   XLSX.writeFile(wb, `attendance_log_${dk}.xlsx`);
 };
@@ -3821,8 +4118,10 @@ async function loadRptDaily(dk){
         </span>`).join('')}
     </div>
   </div>`:''}
-  <div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('เวลาเข้า','สถานะ','ชื่อพนักงาน','สายงาน','หัวหน้า','OT','ค่าแรง','ค่าOT','รวม','GPS')}
-  <tbody>${lateRecs.length===0?EmptyR(10):lateRecs.map(r=>`<tr class="hover:bg-gray-50 ${r._late?'bg-red-50':''}">
+  <div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('เวลาเข้า','สถานะ','ชื่อพนักงาน','สายงาน','หัวหน้า','OT','ค่าแรง','ค่าOT','รวม','<span style="color:#dc2626">เบิกล่วงหน้า</span>','GPS')}
+  <tbody>${lateRecs.length===0?EmptyR(11):lateRecs.map(r=>{
+    const advTotal = sumAdvances(r.empId);
+    return`<tr class="hover:bg-gray-50 ${r._late?'bg-red-50':''}">
     <td class="px-4 py-2 font-mono">${r.checkInTime}</td>
     <td class="px-4 py-2">${r._late
       ? `<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;white-space:nowrap;"><i class="fas fa-clock mr-1"></i>สาย ${r._minutesLate} นาที</span>`
@@ -3834,13 +4133,16 @@ async function loadRptDaily(dk){
     <td class="px-4 py-2 text-right">฿${r.wage.toLocaleString()}</td>
     <td class="px-4 py-2 text-right">฿${r.otPay.toLocaleString()}</td>
     <td class="px-4 py-2 text-right font-bold text-blue-700">฿${r.total.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right" style="color:#dc2626;font-weight:700;">${advTotal>0?'฿'+advTotal.toLocaleString():'-'}</td>
     <td class="px-4 py-2">${r.gpsOk?bdg('green','✓'):bdg('red','✗')}</td>
-  </tr>`).join('')}</tbody>
+  </tr>`}).join('')}</tbody>
   <tfoot class="bg-gray-50 font-bold"><tr>
     <td colspan="6" class="px-4 py-2 text-right">รวม</td>
     <td class="px-4 py-2 text-right">฿${tW.toLocaleString()}</td>
     <td class="px-4 py-2 text-right">฿${tO.toLocaleString()}</td>
-    <td class="px-4 py-2 text-right text-blue-700">฿${tA.toLocaleString()}</td><td></td>
+    <td class="px-4 py-2 text-right text-blue-700">฿${tA.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right" style="color:#dc2626;">฿${lateRecs.reduce((s,r)=>s+sumAdvances(r.empId),0).toLocaleString()}</td>
+    <td></td>
   </tr></tfoot></table></div>`);
 }
 window.loadRptDaily=loadRptDaily;
@@ -3880,8 +4182,11 @@ async function loadRptMonthly(month){
     ${StatCard('ค่าแรงรวม','฿'+tW.toLocaleString(),'fa-coins','yellow')}
     ${StatCard('รวมทั้งหมด','฿'+tA.toLocaleString(),'fa-sack-dollar','purple')}
   </div>
-  <div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('ชื่อพนักงาน','สายงาน','หัวหน้า','วัน','OT(ชม.)','ค่าแรง','ค่าOT','รวม','สถานที่')}
-  <tbody>${rows.length===0?EmptyR(9):rows.map(r=>`<tr class="hover:bg-gray-50">
+  <div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('ชื่อพนักงาน','สายงาน','หัวหน้า','วัน','OT(ชม.)','ค่าแรง','ค่าOT','รวม','<span style="color:#dc2626">เบิกล่วงหน้า</span>','คงเหลือ','สถานที่')}
+  <tbody>${rows.length===0?EmptyR(11):rows.map(r=>{
+    const advAmt = sumAdvances(r.empId, month);
+    const net    = r.total - advAmt;
+    return`<tr class="hover:bg-gray-50">
     <td class="px-4 py-2 font-medium">${r.empName}</td>
     <td class="px-4 py-2">${r.dept}</td><td class="px-4 py-2">${r.sup}</td>
     <td class="px-4 py-2 text-center font-bold">${r.days}</td>
@@ -3889,14 +4194,19 @@ async function loadRptMonthly(month){
     <td class="px-4 py-2 text-right">฿${r.wage.toLocaleString()}</td>
     <td class="px-4 py-2 text-right">฿${r.otPay.toLocaleString()}</td>
     <td class="px-4 py-2 text-right font-bold text-blue-700">฿${r.total.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right" style="color:#dc2626;font-weight:700;">${advAmt>0?'฿'+advAmt.toLocaleString():'-'}</td>
+    <td class="px-4 py-2 text-right font-bold" style="color:${net<0?'#dc2626':'#16a34a'};">฿${net.toLocaleString()}</td>
     <td class="px-4 py-2 text-xs text-gray-400">${[...r.places].join(', ')}</td>
-  </tr>`).join('')}</tbody>
+  </tr>`}).join('')}</tbody>
   <tfoot class="bg-blue-50 font-bold"><tr>
     <td colspan="3" class="px-4 py-2 text-right">รวม</td>
     <td class="px-4 py-2 text-center">${rows.reduce((s,r)=>s+r.days,0)}</td><td></td>
     <td class="px-4 py-2 text-right">฿${tW.toLocaleString()}</td>
     <td class="px-4 py-2 text-right">฿${tO.toLocaleString()}</td>
-    <td class="px-4 py-2 text-right text-blue-700">฿${tA.toLocaleString()}</td><td></td>
+    <td class="px-4 py-2 text-right text-blue-700">฿${tA.toLocaleString()}</td>
+    <td class="px-4 py-2 text-right" style="color:#dc2626;">฿${rows.reduce((s,r)=>s+sumAdvances(r.empId,month),0).toLocaleString()}</td>
+    <td class="px-4 py-2 text-right" style="color:#16a34a;">฿${rows.reduce((s,r)=>s+r.total-sumAdvances(r.empId,month),0).toLocaleString()}</td>
+    <td></td>
   </tr></tfoot></table></div>`);
 }
 window.loadRptMonthly=loadRptMonthly;
@@ -7928,23 +8238,30 @@ window.loadSupRpt=async function(month){
         </div>
         <div class="overflow-x-auto px-2 pb-3">
           <table class="min-w-full text-xs">
-            ${THead('พนักงาน','สายงาน','วัน','ค่าแรง','OT','รวม')}
+            ${THead('พนักงาน','สายงาน','วัน','ค่าแรง','OT','รวม','<span style="color:#dc2626">เบิกล่วงหน้า</span>','คงเหลือ')}
             <tbody>
-              ${empRows.length===0?`<tr><td colspan="6" class="text-center px-4 py-4 text-gray-400 text-xs">ไม่มีข้อมูล</td></tr>`
-                :empRows.sort((a,b)=>b.tTotal-a.tTotal).map(r=>`<tr class="hover:bg-blue-50">
+              ${empRows.length===0?`<tr><td colspan="8" class="text-center px-4 py-4 text-gray-400 text-xs">ไม่มีข้อมูล</td></tr>`
+                :empRows.sort((a,b)=>b.tTotal-a.tTotal).map(r=>{
+                  const advAmt = sumAdvances(r.empId, month);
+                  const net    = r.tTotal - advAmt;
+                  return`<tr class="hover:bg-blue-50">
                   <td class="px-3 py-2 font-medium">${r.empName}</td>
                   <td class="px-3 py-2 text-gray-400">${r.dept}</td>
                   <td class="px-3 py-2 text-center font-bold">${r.days}</td>
                   <td class="px-3 py-2 text-right">฿${r.tWage.toLocaleString()}</td>
                   <td class="px-3 py-2 text-right text-yellow-700">${r.tOt>0?'฿'+r.tOt.toLocaleString():'-'}</td>
                   <td class="px-3 py-2 text-right font-bold text-blue-700">฿${r.tTotal.toLocaleString()}</td>
-                </tr>`).join('')}
+                  <td class="px-3 py-2 text-right font-bold" style="color:#dc2626;">${advAmt>0?'฿'+advAmt.toLocaleString():'-'}</td>
+                  <td class="px-3 py-2 text-right font-bold" style="color:${net<0?'#dc2626':'#16a34a'};">฿${net.toLocaleString()}</td>
+                </tr>`}).join('')}
               <tr class="bg-gray-50 font-bold border-t-2 border-gray-200">
                 <td colspan="2" class="px-3 py-2 text-right text-gray-600 text-xs">รวมสายงาน</td>
                 <td class="px-3 py-2 text-center">${s.days}</td>
                 <td class="px-3 py-2 text-right">฿${(s.tWage-s.tOt).toLocaleString()}</td>
                 <td class="px-3 py-2 text-right text-yellow-700">฿${s.tOt.toLocaleString()}</td>
                 <td class="px-3 py-2 text-right text-blue-700">฿${s.tWage.toLocaleString()}</td>
+                <td class="px-3 py-2 text-right" style="color:#dc2626;">฿${empRows.reduce((sum,r)=>sum+sumAdvances(r.empId,month),0).toLocaleString()}</td>
+                <td class="px-3 py-2 text-right" style="color:#16a34a;">฿${empRows.reduce((sum,r)=>sum+r.tTotal-sumAdvances(r.empId,month),0).toLocaleString()}</td>
               </tr>
             </tbody>
           </table>
