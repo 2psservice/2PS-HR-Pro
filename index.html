@@ -862,6 +862,7 @@ function buildBottomNav(menus){
 function getMenus(role){
   if(role==='admin')return[
     {tab:'dashboard',icon:'fas fa-chart-pie',label:'ภาพรวมประจำวัน'},
+    {tab:'attendance-log',icon:'fas fa-clipboard-check',label:'บันทึกการเข้างาน',c:'text-emerald-400'},
     {div:1,label:'Master Data'},
     {tab:'depts',icon:'fas fa-sitemap',label:'กำหนดสายงาน'},
     {tab:'sups',icon:'fas fa-user-tie',label:'กำหนดหัวหน้างาน'},
@@ -875,11 +876,12 @@ function getMenus(role){
     {tab:'rpt-emp',icon:'fas fa-id-card',label:'ประวัติรายบุคคล'},
     {div:1,label:'ตั้งค่า'},
     {tab:'gps-locations',icon:'fas fa-map-marked-alt',label:'กำหนดพื้นที่เข้างาน',c:'text-cyan-400'},
-    {tab:'checkin-settings',icon:'fas fa-id-badge',label:'วิธีเช็คชื่อ / ใบหน้า',c:'text-purple-400'},
+    {tab:'checkin-settings',icon:'fas fa-smile',label:'ลงทะเบียนใบหน้าพนักงาน',c:'text-purple-400'},
     {tab:'area-methods',icon:'fas fa-map-pin',label:'วิธีเช็คชื่อรายพื้นที่',c:'text-orange-400'},
     {tab:'device-bindings',icon:'fas fa-shield-alt',label:'Device Binding',c:'text-red-400'},
     {tab:'fraud-alerts',icon:'fas fa-exclamation-triangle',label:'แจ้งเตือนทุจริต',c:'text-orange-400'},
     {tab:'live-track',icon:'fas fa-satellite-dish',label:'Live GPS Tracking',c:'text-green-400'},
+    {tab:'gps-timeline',icon:'fas fa-route',label:'Timeline GPS Tracking',c:'text-teal-400'},
     {tab:'manage-pwd',icon:'fas fa-key',label:'จัดการรหัสผ่าน'},
     {div:1,label:'จำลองระบบ'},
     {tab:'qr-page',icon:'fas fa-qrcode',label:'หน้าจอหัวหน้างาน',c:'text-blue-400'},
@@ -954,9 +956,10 @@ function renderPage(tab){
   const mc=document.getElementById('main-content');mc.innerHTML='';
   const map={
     dashboard:pgDashboard,depts:pgDepts,sups:pgSups,emps:pgEmps,wages:pgWages,'org-chart':pgOrgChart,
+    'attendance-log':pgAttendanceLog,
     'rpt-daily':pgRptDaily,'rpt-monthly':pgRptMonthly,'rpt-sup':pgRptSup,'rpt-emp':pgRptEmp,
     'manage-pwd':pgManagePwd,'checkin-settings':pgCheckinSettings,
-    'area-methods':pgAreaMethods,'device-bindings':pgDeviceBindings,'fraud-alerts':pgFraudAlerts,'live-track':pgLiveTrack,
+    'area-methods':pgAreaMethods,'device-bindings':pgDeviceBindings,'fraud-alerts':pgFraudAlerts,'live-track':pgLiveTrack,'gps-timeline':pgGpsTimeline,
     'gps-locations':pgGpsLocations,
     'qr-page':pgQR,'checkin-page':pgCheckin,
     'sup-dash':pgSupDash,'sup-checkin':pgSupCheckin,'sup-emps':()=>pgEmps(CU.id),'add-emp-page':pgAddEmpForm,
@@ -1946,6 +1949,300 @@ function _updateLiveList() {
 }
 
 let _liveTrackRefreshId = null;
+
+// =====================================================================
+//  GPS TIMELINE TRACKING — 3-panel: รายชื่อ | แผนที่ | GPS timeline
+// =====================================================================
+let _gtlMap = null;
+let _gtlPolyline = null;
+let _gtlMarkers = [];
+
+function pgGpsTimeline() {
+  if (_gtlMap) { try { _gtlMap.remove(); } catch(_){} _gtlMap = null; }
+  const mc = document.getElementById('main-content');
+
+  const emps = [...db.employees].sort((a,b)=>a.name.localeCompare(b.name,'th'));
+  const sups = [...db.supervisors].sort((a,b)=>a.name.localeCompare(b.name,'th'));
+
+  function personCard(p, isSup) {
+    const col = isSup ? 'linear-gradient(135deg,#7c3aed,#6d28d9)' : 'linear-gradient(135deg,#0d9488,#0f766e)';
+    return `<div class="gtl-person-card" data-id="${p._key}"
+      onclick="_gtlSelectPerson('${p._key}',${isSup?1:0})"
+      style="display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer;
+        border-bottom:1px solid #f1f5f9;transition:all .12s;border-left:3px solid transparent;"
+      onmouseover="if(!this.classList.contains('gtl-active')){this.style.background='#f0fdfa';this.style.borderLeftColor='#0d9488';}"
+      onmouseout="if(!this.classList.contains('gtl-active')){this.style.background='';this.style.borderLeftColor='transparent';}">
+      <div style="width:34px;height:34px;border-radius:50%;background:${col};
+        display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;">
+        ${isSup?'👔':'👤'}
+      </div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${p.name}</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:1px;">${p.dept||'-'}</div>
+      </div>
+      <div id="gtl-badge-${p._key}"></div>
+    </div>`;
+  }
+
+  mc.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+      <h3 style="font-size:15px;font-weight:700;color:#1e293b;border-left:4px solid #0d9488;padding-left:10px;margin:0;display:flex;align-items:center;gap:8px;">
+        <i class="fas fa-route" style="color:#0d9488;"></i> Timeline GPS Tracking
+      </h3>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:8px;background:#fff;border:1.5px solid #e2e8f0;border-radius:10px;padding:7px 12px;">
+          <i class="fas fa-calendar" style="color:#0d9488;font-size:13px;"></i>
+          <input type="date" id="gtl-date" value="${todayStr}"
+            style="border:none;outline:none;font-size:13px;font-family:Sarabun,sans-serif;color:#1e293b;background:transparent;cursor:pointer;"
+            onchange="_gtlOnDateChange()">
+        </div>
+        <div id="gtl-export-btn" style="display:none;">
+          <button onclick="_gtlExport()"
+            style="background:#16a34a;color:#fff;border:none;border-radius:10px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;">
+            <i class="fas fa-file-excel mr-1"></i>Export
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:290px 1fr 250px;gap:10px;height:calc(100vh - 165px);min-height:500px;">
+
+      <!-- Col 1: GPS Timeline list -->
+      <div style="display:flex;flex-direction:column;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;background:#fff;">
+        <div id="gtl-info-bar" style="flex-shrink:0;padding:14px 16px;background:linear-gradient(135deg,#0d9488,#0f766e);">
+          <div style="text-align:center;color:rgba(255,255,255,.65);font-size:13px;padding:6px 0;">
+            <i class="fas fa-hand-pointer" style="margin-right:6px;"></i>เลือกชื่อด้านขวา
+          </div>
+        </div>
+        <div style="flex:1;overflow-y:auto;" id="gtl-list">
+          <div style="padding:40px 16px;text-align:center;color:#94a3b8;">
+            <i class="fas fa-route" style="font-size:36px;display:block;margin-bottom:10px;opacity:.2;"></i>
+            <div style="font-size:13px;">คลิกชื่อพนักงาน<br>เพื่อดู Timeline GPS</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Col 2: Map -->
+      <div style="border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;background:#f8fafc;position:relative;">
+        <div id="gtl-map-placeholder" style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#94a3b8;gap:12px;">
+          <i class="fas fa-map-marked-alt" style="font-size:52px;opacity:.18;"></i>
+          <div style="font-size:14px;font-weight:600;opacity:.4;text-align:center;">เลือกชื่อพนักงานด้านขวา<br>เพื่อแสดงเส้นทาง GPS</div>
+        </div>
+        <div id="gtl-map" style="height:100%;display:none;"></div>
+        <div id="gtl-map-loading" style="display:none;position:absolute;inset:0;background:rgba(255,255,255,.85);border-radius:16px;align-items:center;justify-content:center;flex-direction:column;gap:10px;z-index:999;">
+          <div class="loading-spinner" style="width:36px;height:36px;border-width:4px;border-top-color:#0d9488;"></div>
+          <div style="font-size:13px;color:#64748b;font-weight:600;">กำลังโหลด GPS...</div>
+        </div>
+      </div>
+
+      <!-- Col 3: Person list -->
+      <div style="display:flex;flex-direction:column;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;background:#fff;">
+        <div style="padding:10px 12px 8px;flex-shrink:0;border-bottom:1px solid #f1f5f9;">
+          <input type="text" id="gtl-search" placeholder="🔍 ค้นหาชื่อ..." oninput="_gtlSearchPerson(this.value)"
+            style="width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:8px 12px;font-size:13px;
+              font-family:Sarabun,sans-serif;color:#1e293b;outline:none;box-sizing:border-box;"
+            onfocus="this.style.borderColor='#0d9488'" onblur="this.style.borderColor='#e2e8f0'">
+        </div>
+        <div style="padding:6px 14px;font-size:11px;font-weight:700;color:#94a3b8;background:#f8fafc;border-bottom:1px solid #f1f5f9;flex-shrink:0;">
+          ทั้งหมด ${emps.length + sups.length} คน · badge = จำนวนจุด GPS วันนี้
+        </div>
+        <div style="flex:1;overflow-y:auto;" id="gtl-person-list">
+          ${sups.length ? `<div style="padding:6px 14px 3px;font-size:10px;font-weight:700;color:#7c3aed;text-transform:uppercase;letter-spacing:.5px;background:#faf5ff;border-bottom:1px solid #f3e8ff;">
+            <i class="fas fa-user-tie mr-1"></i>หัวหน้างาน (${sups.length})</div>
+            ${sups.map(s=>personCard(s,true)).join('')}` : ''}
+          ${emps.length ? `<div style="padding:6px 14px 3px;font-size:10px;font-weight:700;color:#0d9488;text-transform:uppercase;letter-spacing:.5px;background:#f0fdfa;border-bottom:1px solid #ccfbf1;">
+            <i class="fas fa-users mr-1"></i>พนักงาน (${emps.length})</div>
+            ${emps.map(e=>personCard(e,false)).join('')}` : ''}
+        </div>
+      </div>
+
+    </div>`;
+
+  _gtlLoadBadges(todayStr);
+}
+
+async function _gtlLoadBadges(dk) {
+  const all = [...db.employees.map(e=>e._key), ...db.supervisors.map(s=>s._key)];
+  for (const id of all) {
+    const raw = await fbGet('/liveTrackHistory/'+id).catch(()=>null);
+    if (!raw) continue;
+    const cnt = Object.values(raw).filter(p=>p.ts && new Date(p.ts).toISOString().slice(0,10)===dk).length;
+    const badge = document.getElementById('gtl-badge-'+id);
+    if (badge) badge.innerHTML = cnt>0
+      ? `<span style="background:#0d9488;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;">${cnt}</span>` : '';
+  }
+}
+
+window._gtlOnDateChange = function() {
+  const dk = document.getElementById('gtl-date')?.value; if(!dk) return;
+  document.querySelectorAll('[id^="gtl-badge-"]').forEach(el=>el.innerHTML='');
+  _gtlLoadBadges(dk);
+  if (window._gtlSelectedId) _gtlSelectPerson(window._gtlSelectedId, window._gtlSelectedIsSup);
+};
+
+window._gtlSearchPerson = function(q) {
+  const ql = q.toLowerCase();
+  document.querySelectorAll('.gtl-person-card').forEach(el => {
+    const name = el.querySelector('div > div')?.textContent?.toLowerCase()||'';
+    el.style.display = (!ql||name.includes(ql)) ? '' : 'none';
+  });
+};
+
+window._gtlSelectPerson = async function(personId, isSup) {
+  const dk = document.getElementById('gtl-date')?.value || todayStr;
+  window._gtlSelectedId    = personId;
+  window._gtlSelectedIsSup = isSup;
+
+  document.querySelectorAll('.gtl-person-card').forEach(el => {
+    const active = el.dataset.id === personId;
+    el.classList.toggle('gtl-active', active);
+    el.style.background      = active ? '#f0fdfa' : '';
+    el.style.borderLeftColor = active ? '#0d9488' : 'transparent';
+  });
+
+  const loadingEl   = document.getElementById('gtl-map-loading');
+  const placeholder = document.getElementById('gtl-map-placeholder');
+  const mapDiv      = document.getElementById('gtl-map');
+  const listEl      = document.getElementById('gtl-list');
+  const infoBar     = document.getElementById('gtl-info-bar');
+  const exportBtn   = document.getElementById('gtl-export-btn');
+
+  if (loadingEl) loadingEl.style.display='flex';
+  listEl.innerHTML = `<div style="padding:40px;text-align:center;color:#94a3b8;font-size:13px;">
+    <div class="loading-spinner" style="width:28px;height:28px;border-width:3px;margin:0 auto 10px;border-top-color:#0d9488;"></div>กำลังโหลด GPS History...</div>`;
+
+  const person = isSup ? db.supervisors.find(s=>s._key===personId) : db.employees.find(e=>e._key===personId);
+  if (!person) return;
+
+  const [histRaw, liveRaw] = await Promise.all([
+    fbGet('/liveTrackHistory/'+personId).catch(()=>null),
+    fbGet('/liveTrack/'+personId).catch(()=>null)
+  ]);
+  let allPts = histRaw ? Object.values(histRaw) : [];
+  if (liveRaw?.ts && !allPts.find(p=>Math.abs(p.ts-liveRaw.ts)<30000)) allPts.push(liveRaw);
+  const pts = allPts.filter(p=>p.lat&&p.lng && new Date(p.ts).toISOString().slice(0,10)===dk).sort((a,b)=>a.ts-b.ts);
+
+  window._gtlCurrentPts    = pts;
+  window._gtlCurrentPerson = person;
+  window._gtlCurrentDk     = dk;
+
+  if (loadingEl) loadingEl.style.display='none';
+  if (exportBtn) exportBtn.style.display = pts.length ? 'block' : 'none';
+
+  const fmt  = ts => new Date(ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+  const fmt2 = ts => new Date(ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const outN = pts.filter(p=>!p.inArea).length;
+
+  if (infoBar) infoBar.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:${pts.length?'10':'0'}px;">
+      <div style="width:34px;height:34px;background:rgba(255,255,255,.2);border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px;">${isSup?'👔':'👤'}</div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${person.name}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.75);">${person.dept||''} · ${new Date(dk).toLocaleDateString('th-TH',{day:'numeric',month:'short'})}</div>
+      </div>
+    </div>
+    ${pts.length ? `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;text-align:center;">
+      ${[
+        {v:pts.length+' จุด',l:'GPS Update'},
+        {v:fmt(pts[0].ts)+'–'+fmt(pts[pts.length-1].ts),l:'ช่วงเวลา'},
+        {v:outN>0?'🚨 '+outN:'✅ 0',l:'นอกพื้นที่'},
+      ].map(s=>`<div style="background:rgba(255,255,255,.12);border-radius:8px;padding:6px 4px;">
+        <div style="font-size:12px;font-weight:700;color:#fff;">${s.v}</div>
+        <div style="font-size:9px;color:rgba(255,255,255,.7);margin-top:1px;">${s.l}</div>
+      </div>`).join('')}
+    </div>` : `<div style="font-size:12px;color:rgba(255,255,255,.6);text-align:center;">ไม่พบข้อมูล GPS วันที่ ${dk}</div>`}`;
+
+  if (!pts.length) {
+    listEl.innerHTML = `<div style="padding:40px 16px;text-align:center;color:#94a3b8;">
+      <i class="fas fa-map-marker-slash" style="font-size:36px;display:block;margin-bottom:10px;opacity:.25;"></i>
+      <div style="font-size:13px;font-weight:600;margin-bottom:4px;">ไม่พบข้อมูล GPS</div>
+      <div style="font-size:11px;">วันที่ ${dk}<br>ยังไม่มีการอัพเดทตำแหน่ง</div>
+    </div>`;
+    if (placeholder) { placeholder.style.display='flex'; mapDiv.style.display='none'; }
+    return;
+  }
+
+  listEl.innerHTML = `
+    <div style="padding:8px 14px 6px;font-size:11px;font-weight:700;color:#64748b;background:#f8fafc;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center;">
+      <span><i class="fas fa-history mr-1"></i>${pts.length} จุด GPS</span>
+      ${outN>0?`<span style="background:#fee2e2;color:#dc2626;font-size:10px;padding:2px 7px;border-radius:8px;font-weight:700;">🚨 นอกพื้นที่ ${outN}</span>`
+              :`<span style="background:#dcfce7;color:#16a34a;font-size:10px;padding:2px 7px;border-radius:8px;font-weight:700;">✅ ในพื้นที่ตลอด</span>`}
+    </div>
+    <div id="gtl-points-wrap">
+      ${pts.map((p,i)=>{
+        const col=p.inArea?'#16a34a':'#dc2626';
+        const isFirst=i===0,isLast=i===pts.length-1;
+        const gap=i>0?Math.round((p.ts-pts[i-1].ts)/60000):0;
+        return `<div class="gtl-pt-row" data-idx="${i}"
+          style="display:flex;gap:0;${!p.inArea?'background:#fff5f5;':''}border-bottom:1px solid #f8fafc;cursor:pointer;transition:background .1s;"
+          onclick="_gtlFocusPoint(${i})"
+          onmouseover="this.style.background='${p.inArea?'#f0fdf4':'#fef2f2'}'"
+          onmouseout="this.style.background='${!p.inArea?'#fff5f5':''}'">
+          <div style="display:flex;flex-direction:column;align-items:center;width:30px;padding:10px 0 0;flex-shrink:0;">
+            <div id="gtl-dot-${i}" style="width:${isFirst||isLast?13:9}px;height:${isFirst||isLast?13:9}px;border-radius:50%;
+              background:${isFirst?'#2563eb':isLast?'#7c3aed':col};
+              border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.2);transition:transform .2s;flex-shrink:0;"></div>
+            ${!isLast?`<div style="width:2px;flex:1;min-height:14px;margin-top:3px;background:${!p.inArea?'#fecaca':'#d1fae5'};"></div>`:''}
+          </div>
+          <div style="flex:1;padding:9px 10px 9px 4px;min-width:0;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:4px;flex-wrap:wrap;">
+              <span style="font-size:12px;font-weight:700;color:#1e293b;font-family:monospace;">${fmt2(p.ts)}</span>
+              <span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap;
+                background:${p.inArea?'#dcfce7':'#fee2e2'};color:${p.inArea?'#166534':'#991b1b'};">
+                ${p.inArea?'✅':'🚨'}
+              </span>
+            </div>
+            ${isFirst?'<div style="font-size:10px;color:#2563eb;font-weight:700;margin-top:1px;">📍 จุดเริ่มต้น</div>':''}
+            ${isLast&&!isFirst?'<div style="font-size:10px;color:#7c3aed;font-weight:700;margin-top:1px;">🏁 ล่าสุด</div>':''}
+            ${!p.inArea?`<div style="font-size:11px;color:#dc2626;margin-top:1px;">ห่าง ${Math.round(p.dist||0)} ม.</div>`:''}
+            ${p.loc?`<div style="font-size:10px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">📍 ${p.loc}</div>`:''}
+            ${gap>0?`<div style="font-size:10px;color:#cbd5e1;">⏱ +${gap} นาที</div>`:''}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+
+  if (placeholder) placeholder.style.display='none';
+  mapDiv.style.display='block';
+  if (_gtlMap) { try{_gtlMap.remove();}catch(_){} _gtlMap=null; }
+  _gtlMarkers=[];
+
+  setTimeout(()=>{
+    if(typeof L==='undefined')return;
+    const lls=pts.map(p=>[p.lat,p.lng]);
+    _gtlMap=L.map(mapDiv,{zoomControl:true}).setView(lls[lls.length-1],14);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap',maxZoom:19}).addTo(_gtlMap);
+    const zc=['#3b82f6','#10b981','#f59e0b','#ef4444'];
+    gpsLocations.forEach((loc,i)=>L.circle([loc.lat,loc.lng],{radius:loc.radius||100,color:zc[i%4],fillColor:zc[i%4],fillOpacity:0.07,weight:2,dashArray:'5,4'}).bindTooltip(loc.name||'Zone').addTo(_gtlMap));
+    L.polyline(lls,{color:'#0d9488',weight:3,opacity:0.85,dashArray:'8,4'}).addTo(_gtlMap);
+    const fmt3=ts=>new Date(ts).toLocaleString('th-TH',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    pts.forEach((p,i)=>{
+      const isF=i===0,isL=i===pts.length-1;
+      const col=isF?'#2563eb':isL?'#7c3aed':(p.inArea?'#16a34a':'#dc2626');
+      const sz=isF||isL?16:(p.inArea?8:12);
+      const icon=L.divIcon({html:`<div style="width:${sz}px;height:${sz}px;border-radius:50%;background:${col};border:${isF||isL?'3':'2'}px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,.4);transition:transform .2s;"></div>`,className:'',iconSize:[sz,sz],iconAnchor:[sz/2,sz/2]});
+      const m=L.marker([p.lat,p.lng],{icon}).addTo(_gtlMap);
+      m.bindPopup(`<div style="font-family:Sarabun,sans-serif;min-width:160px;">
+        <div style="font-weight:700;color:${col};margin-bottom:4px;">${isF?'📍 จุดเริ่มต้น':isL?'🏁 จุดล่าสุด':(p.inArea?'✅ ในพื้นที่':'🚨 นอกพื้นที่')}</div>
+        <div style="font-size:12px;color:#1e293b;font-weight:600;">${fmt3(p.ts)}</div>
+        ${!p.inArea?`<div style="font-size:12px;color:#dc2626;margin-top:3px;">ห่าง ${Math.round(p.dist||0)} ม.</div>`:''}
+        ${p.loc?`<div style="font-size:11px;color:#64748b;margin-top:2px;">📍 ${p.loc}</div>`:''}
+        <div style="font-size:10px;color:#94a3b8;margin-top:3px;font-family:monospace;">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</div>
+        ${p.acc?`<div style="font-size:10px;color:#94a3b8;">±${Math.round(p.acc)} ม.</div>`:''}
+      </div>`);
+      if(isF) m.bindTooltip('เริ่ม',{permanent:true,direction:'top',offset:[0,-sz/2-2]});
+      if(isL&&!isF) m.bindTooltip('ล่าสุด '+fmt(pts[pts.length-1].ts),{permanent:true,direction:'top',offset:[0,-sz/2-2]});
+      _gtlMarkers.push(m);
+    });
+    try{_gtlMap.fitBounds(L.latLngBounds(lls),{padding:[28,28],maxZoom:16});}catch(_){}
+    setTimeout(()=>{try{_gtlMap.invalidateSize();}catch(_){}},200);
+  },300);
+};
+
+window._gtlLoad = async function() {
+  const pid=document.getElementById('gtl-person')?.value;
+  if(pid) _gtlSelectPerson(pid, db.supervisors.some(s=>s._key===pid));
+};
 
 async function pgLiveTrack() {
   const mc = document.getElementById('main-content');
@@ -3218,6 +3515,266 @@ window.saveWage=async()=>{
 // =====================================================================
 //  REPORT DAILY
 // =====================================================================
+// =====================================================================
+//  ATTENDANCE LOG — บันทึกการเข้างาน (ดูย้อนหลังได้)
+// =====================================================================
+function pgAttendanceLog() {
+  const mc = document.getElementById('main-content');
+  mc.innerHTML = `
+    <div class="flex justify-between items-center mb-4 flex-wrap gap-2">
+      <h3 class="text-base font-bold text-gray-700 border-l-4 border-emerald-500 pl-3">
+        <i class="fas fa-clipboard-check text-emerald-500 mr-2"></i>บันทึกการเข้างาน
+      </h3>
+    </div>
+    <div id="alog-body">
+      <div class="flex justify-center py-10">
+        <div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div>
+      </div>
+    </div>`;
+  _renderAttendanceLog(todayStr);
+}
+
+async function _renderAttendanceLog(dk) {
+  await loadAttendanceDate(dk);
+  const el = document.getElementById('alog-body'); if (!el) return;
+
+  const isSup = CU.role === 'supervisor';
+  let recs = getAttendanceArray(dk);
+  if (isSup) recs = recs.filter(r => recBelongsToCurrentSup(r));
+
+  // คำนวณมาสาย
+  recs = recs.map(r => {
+    const emp = db.employees.find(e => e._key === r.empId) || { dept: r.dept };
+    const li = checkLate(emp, r.checkInTime);
+    return { ...r, _late: li.late, _minutesLate: li.minutesLate, _workStart: li.workStart };
+  });
+
+  // สถิติ
+  const total   = recs.length;
+  const lateN   = recs.filter(r => r._late).length;
+  const onTimeN = total - lateN;
+  const tWage   = recs.reduce((s,r) => s + r.wage, 0);
+  const tOT     = recs.reduce((s,r) => s + r.otPay, 0);
+  const tTotal  = recs.reduce((s,r) => s + r.total, 0);
+  const tOTH    = recs.reduce((s,r) => s + (r.otHours||0), 0);
+
+  // supervisor & dept options สำหรับ filter
+  const supOpts = ['', ...new Set(recs.map(r => r.sup).filter(Boolean))];
+  const deptOpts = ['', ...new Set(recs.map(r => r.dept).filter(Boolean))];
+
+  el.innerHTML = `
+    <!-- Filter bar -->
+    <div style="background:#fff;border-radius:16px;box-shadow:0 1px 6px rgba(0,0,0,.06);padding:16px 20px;margin-bottom:16px;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
+      <!-- Date picker -->
+      <div>
+        <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px;">วันที่</div>
+        <input type="date" id="alog-date" value="${dk}"
+          style="border:1.5px solid #e2e8f0;border-radius:10px;padding:8px 12px;font-size:13px;font-family:Sarabun,sans-serif;color:#1e293b;outline:none;cursor:pointer;"
+          onfocus="this.style.borderColor='#10b981'" onblur="this.style.borderColor='#e2e8f0'"
+          onchange="_renderAttendanceLog(this.value)">
+      </div>
+      <!-- Search -->
+      <div style="flex:1;min-width:160px;">
+        <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px;">ค้นหาชื่อ</div>
+        <input type="text" id="alog-search" placeholder="พิมพ์ชื่อพนักงาน..." oninput="_alogFilter()"
+          style="width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:8px 12px;font-size:13px;font-family:Sarabun,sans-serif;color:#1e293b;outline:none;box-sizing:border-box;"
+          onfocus="this.style.borderColor='#10b981'" onblur="this.style.borderColor='#e2e8f0'">
+      </div>
+      <!-- Supervisor filter -->
+      ${!isSup ? `<div>
+        <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px;">หัวหน้างาน</div>
+        <select id="alog-sup" onchange="_alogFilter()"
+          style="border:1.5px solid #e2e8f0;border-radius:10px;padding:8px 12px;font-size:13px;font-family:Sarabun,sans-serif;color:#1e293b;outline:none;background:#fff;">
+          ${supOpts.map(s => `<option value="${s}">${s||'ทั้งหมด'}</option>`).join('')}
+        </select>
+      </div>` : ''}
+      <!-- Dept filter -->
+      <div>
+        <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px;">สายงาน</div>
+        <select id="alog-dept" onchange="_alogFilter()"
+          style="border:1.5px solid #e2e8f0;border-radius:10px;padding:8px 12px;font-size:13px;font-family:Sarabun,sans-serif;color:#1e293b;outline:none;background:#fff;">
+          ${deptOpts.map(d => `<option value="${d}">${d||'ทั้งหมด'}</option>`).join('')}
+        </select>
+      </div>
+      <!-- Status filter -->
+      <div>
+        <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px;">สถานะ</div>
+        <select id="alog-status" onchange="_alogFilter()"
+          style="border:1.5px solid #e2e8f0;border-radius:10px;padding:8px 12px;font-size:13px;font-family:Sarabun,sans-serif;color:#1e293b;outline:none;background:#fff;">
+          <option value="">ทั้งหมด</option>
+          <option value="ontime">ตรงเวลา</option>
+          <option value="late">มาสาย</option>
+          <option value="out">ออกงานแล้ว</option>
+          <option value="noout">ยังไม่ออก</option>
+        </select>
+      </div>
+      <!-- Export -->
+      <div>
+        <div style="font-size:11px;font-weight:700;color:transparent;margin-bottom:4px;">.</div>
+        <button onclick="_alogExport('${dk}')"
+          style="background:#16a34a;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;white-space:nowrap;">
+          <i class="fas fa-file-excel mr-1"></i>Export
+        </button>
+      </div>
+    </div>
+
+    <!-- Summary cards -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-bottom:16px;">
+      ${[
+        {icon:'fa-user-check', label:'เข้างาน',     val: total+' คน',          col:'#16a34a', bg:'#f0fdf4', bc:'#bbf7d0'},
+        {icon:'fa-check',      label:'ตรงเวลา',     val: onTimeN+' คน',         col:'#2563eb', bg:'#eff6ff', bc:'#bfdbfe'},
+        {icon:'fa-clock',      label:'มาสาย',       val: lateN+' คน',           col:'#dc2626', bg:'#fef2f2', bc:'#fecaca'},
+        {icon:'fa-hourglass',  label:'OT รวม',      val: tOTH.toFixed(1)+' ชม.',col:'#7c3aed', bg:'#f5f3ff', bc:'#e9d5ff'},
+        {icon:'fa-coins',      label:'ค่าแรงรวม',   val:'฿'+tWage.toLocaleString(), col:'#ca8a04', bg:'#fefce8', bc:'#fde68a'},
+        {icon:'fa-money-bill', label:'รวมทั้งสิ้น', val:'฿'+tTotal.toLocaleString(),col:'#0891b2', bg:'#ecfeff', bc:'#a5f3fc'},
+      ].map(s=>`
+        <div style="background:${s.bg};border:1.5px solid ${s.bc};border-radius:14px;padding:14px 16px;">
+          <div style="font-size:10px;font-weight:700;color:${s.col};text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">
+            <i class="fas ${s.icon}" style="margin-right:4px;"></i>${s.label}
+          </div>
+          <div style="font-size:18px;font-weight:800;color:#1e293b;">${s.val}</div>
+        </div>`).join('')}
+    </div>
+
+    <!-- มาสาย banner -->
+    <div id="alog-late-banner"></div>
+
+    <!-- Table -->
+    <div style="background:#fff;border-radius:16px;box-shadow:0 1px 6px rgba(0,0,0,.06);overflow:hidden;">
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-sm" id="alog-table">
+          <thead style="background:#f8fafc;border-bottom:2px solid #e2e8f0;">
+            <tr>
+              ${['#','ชื่อพนักงาน','สายงาน','หัวหน้างาน','เข้างาน','ออกงาน','สถานะ','OT (ชม.)','ค่าแรง','ค่า OT','รวม','GPS','วิธี']
+                .map(h=>`<th style="padding:10px 14px;text-align:left;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;">${h}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody id="alog-tbody">
+            ${_buildAlogRows(recs)}
+          </tbody>
+          <tfoot style="background:#f1f5f9;border-top:2px solid #e2e8f0;">
+            <tr id="alog-tfoot">
+              <td colspan="8" style="padding:10px 14px;font-weight:700;font-size:13px;color:#475569;">รวม ${total} รายการ</td>
+              <td style="padding:10px 14px;font-weight:800;color:#16a34a;font-size:13px;">฿${tWage.toLocaleString()}</td>
+              <td style="padding:10px 14px;font-weight:800;color:#7c3aed;font-size:13px;">฿${tOT.toLocaleString()}</td>
+              <td style="padding:10px 14px;font-weight:800;color:#1d4ed8;font-size:13px;">฿${tTotal.toLocaleString()}</td>
+              <td colspan="2"></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>`;
+
+  // เก็บข้อมูลสำหรับ filter
+  window._alogAllRecs = recs;
+  window._alogDk = dk;
+  _renderAlogLateBanner(recs.filter(r=>r._late));
+}
+
+function _buildAlogRows(recs) {
+  if (!recs.length) return `<tr><td colspan="13" style="padding:32px;text-align:center;color:#94a3b8;font-size:14px;"><i class="fas fa-inbox" style="font-size:28px;margin-bottom:10px;display:block;"></i>ไม่มีข้อมูลการเข้างาน</td></tr>`;
+  return recs.map((r, i) => {
+    const methodIcon = r.checkInMethod==='face' ? '😊' : r.checkInMethod==='gps_button' ? '📍' : '📱';
+    return `<tr style="border-bottom:1px solid #f1f5f9;transition:background .1s;${r._late?'background:#fff7f7;':''}"
+      onmouseover="this.style.background='${r._late?'#fef2f2':'#f8fafc'}'"
+      onmouseout="this.style.background='${r._late?'#fff7f7':''}'">
+      <td style="padding:10px 14px;color:#94a3b8;font-size:12px;">${i+1}</td>
+      <td style="padding:10px 14px;font-weight:700;color:#1e293b;white-space:nowrap;">${r.empName}</td>
+      <td style="padding:10px 14px;color:#64748b;font-size:12px;">${r.dept||'-'}</td>
+      <td style="padding:10px 14px;color:#64748b;font-size:12px;">${r.sup||'-'}</td>
+      <td style="padding:10px 14px;font-family:monospace;font-weight:700;color:${r._late?'#dc2626':'#16a34a'};white-space:nowrap;">${r.checkInTime}</td>
+      <td style="padding:10px 14px;font-family:monospace;color:#64748b;white-space:nowrap;">${r.checkOutTime||'<span style="color:#94a3b8;font-size:11px;">-</span>'}</td>
+      <td style="padding:10px 14px;white-space:nowrap;">
+        ${r._late
+          ? `<span style="background:#fee2e2;color:#991b1b;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;white-space:nowrap;"><i class="fas fa-clock" style="margin-right:3px;"></i>สาย ${r._minutesLate} น.</span>`
+          : `<span style="background:#dcfce7;color:#15803d;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;">✓ ตรงเวลา</span>`}
+      </td>
+      <td style="padding:10px 14px;text-align:center;color:#7c3aed;font-weight:700;">${r.otHours||'-'}</td>
+      <td style="padding:10px 14px;text-align:right;font-weight:700;color:#16a34a;">฿${r.wage.toLocaleString()}</td>
+      <td style="padding:10px 14px;text-align:right;font-weight:700;color:#7c3aed;">฿${(r.otPay||0).toLocaleString()}</td>
+      <td style="padding:10px 14px;text-align:right;font-weight:800;color:#1d4ed8;">฿${r.total.toLocaleString()}</td>
+      <td style="padding:10px 14px;text-align:center;">
+        ${r.gpsOk
+          ? '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">✓</span>'
+          : '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">✗</span>'}
+      </td>
+      <td style="padding:10px 14px;text-align:center;font-size:16px;" title="${r.checkInMethod||'qr'}">${methodIcon}</td>
+    </tr>`;
+  }).join('');
+}
+
+function _renderAlogLateBanner(lateRecs) {
+  const el = document.getElementById('alog-late-banner'); if (!el) return;
+  if (!lateRecs.length) { el.innerHTML=''; return; }
+  el.innerHTML = `
+    <div style="background:linear-gradient(135deg,#dc2626,#b91c1c);border-radius:14px;padding:14px 18px;margin-bottom:14px;box-shadow:0 3px 12px rgba(220,38,38,.2);">
+      <div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:8px;">
+        <i class="fas fa-exclamation-triangle mr-2"></i>มาสาย ${lateRecs.length} คน
+        <span style="font-size:11px;font-weight:400;opacity:.85;margin-left:8px;">รวม ${lateRecs.reduce((s,r)=>s+r._minutesLate,0)} นาที</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        ${lateRecs.map(r=>`
+          <span style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);border-radius:20px;padding:4px 12px;font-size:12px;color:#fff;">
+            <strong>${r.empName}</strong> <span style="opacity:.85;">+${r._minutesLate} น.</span>
+          </span>`).join('')}
+      </div>
+    </div>`;
+}
+
+window._alogFilter = function() {
+  const q      = (document.getElementById('alog-search')?.value||'').toLowerCase();
+  const sup    = document.getElementById('alog-sup')?.value||'';
+  const dept   = document.getElementById('alog-dept')?.value||'';
+  const status = document.getElementById('alog-status')?.value||'';
+  let recs = (window._alogAllRecs||[]).filter(r => {
+    if (q    && !r.empName.toLowerCase().includes(q)) return false;
+    if (sup  && r.sup  !== sup)  return false;
+    if (dept && r.dept !== dept) return false;
+    if (status==='ontime' && r._late)           return false;
+    if (status==='late'   && !r._late)          return false;
+    if (status==='out'    && !r.checkOutTime)   return false;
+    if (status==='noout'  && r.checkOutTime)    return false;
+    return true;
+  });
+  const tbody = document.getElementById('alog-tbody');
+  if (tbody) tbody.innerHTML = _buildAlogRows(recs);
+  const tfoot = document.getElementById('alog-tfoot');
+  if (tfoot) {
+    const tW = recs.reduce((s,r)=>s+r.wage,0);
+    const tO = recs.reduce((s,r)=>s+r.otPay,0);
+    const tT = recs.reduce((s,r)=>s+r.total,0);
+    tfoot.innerHTML = `
+      <td colspan="8" style="padding:10px 14px;font-weight:700;font-size:13px;color:#475569;">รวม ${recs.length} รายการ</td>
+      <td style="padding:10px 14px;font-weight:800;color:#16a34a;font-size:13px;">฿${tW.toLocaleString()}</td>
+      <td style="padding:10px 14px;font-weight:800;color:#7c3aed;font-size:13px;">฿${tO.toLocaleString()}</td>
+      <td style="padding:10px 14px;font-weight:800;color:#1d4ed8;font-size:13px;">฿${tT.toLocaleString()}</td>
+      <td colspan="2"></td>`;
+  }
+  _renderAlogLateBanner(recs.filter(r=>r._late));
+};
+
+window._alogExport = function(dk) {
+  const recs = window._alogAllRecs || [];
+  const ws_data = [
+    ['บันทึกการเข้างาน — ' + dk],
+    ['ชื่อพนักงาน','สายงาน','หัวหน้างาน','เวลาเข้า','เวลาออก','สถานะ','สาย (นาที)','OT (ชม.)','ค่าแรง','ค่า OT','รวม','GPS','วิธี'],
+    ...recs.map(r => [
+      r.empName, r.dept||'-', r.sup||'-',
+      r.checkInTime, r.checkOutTime||'-',
+      r._late ? `สาย ${r._minutesLate} นาที` : 'ตรงเวลา',
+      r._late ? r._minutesLate : 0,
+      r.otHours||0, r.wage, r.otPay||0, r.total,
+      r.gpsOk ? 'ใน' : 'นอก',
+      r.checkInMethod||'qr'
+    ])
+  ];
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(ws_data);
+  ws['!cols'] = [{wch:22},{wch:14},{wch:18},{wch:10},{wch:10},{wch:14},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:8},{wch:8}];
+  XLSX.utils.book_append_sheet(wb, ws, 'บันทึกเข้างาน');
+  XLSX.writeFile(wb, `attendance_log_${dk}.xlsx`);
+};
+
 function pgRptDaily(){
   const mc=document.getElementById('main-content');
   mc.innerHTML=`<div id="rdly"><div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div></div>`;
@@ -4528,17 +5085,34 @@ async function _loadRecentHistory(empObj) {
 
 // ---- หน้าหลังสแกนสำเร็จ ----
 function _renderCheckinDone(wrap, empObj, alr) {
+  const lateInfo = checkLate(empObj, alr.checkInTime);
+  const lateBanner = lateInfo.late ? `
+    <div style="background:linear-gradient(135deg,#dc2626,#b91c1c);border-radius:16px;padding:16px 20px;margin-bottom:14px;display:flex;align-items:center;gap:14px;box-shadow:0 4px 14px rgba(220,38,38,.3);">
+      <div style="width:44px;height:44px;background:rgba(255,255,255,.2);border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+        <i class="fas fa-clock" style="font-size:20px;color:#fff;"></i>
+      </div>
+      <div>
+        <div style="font-size:15px;font-weight:700;color:#fff;">⚠️ มาสาย ${lateInfo.minutesLate} นาที</div>
+        <div style="font-size:12px;color:rgba(255,255,255,.85);margin-top:2px;">
+          เวลาเข้างาน ${lateInfo.workStart} น. · เช็คชื่อ ${alr.checkInTime} น. · สาย ${lateInfo.minutesLate} นาที
+        </div>
+        <div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:3px;">หัวหน้างานได้รับแจ้งเตือนแล้ว</div>
+      </div>
+    </div>` : '';
+
   wrap.innerHTML = `
+    ${lateBanner}
     <!-- การ์ดสำเร็จ -->
     <div style="background:#fff;border-radius:20px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);margin-bottom:16px;">
-      <!-- header สีเขียว -->
-      <div style="background:linear-gradient(135deg,#16a34a,#15803d);padding:28px 24px 24px;text-align:center;color:#fff;">
+      <!-- header สีเขียว (หรือส้มถ้ามาสาย) -->
+      <div style="background:${lateInfo.late ? 'linear-gradient(135deg,#d97706,#b45309)' : 'linear-gradient(135deg,#16a34a,#15803d)'};padding:28px 24px 24px;text-align:center;color:#fff;">
         <div style="width:60px;height:60px;background:rgba(255,255,255,.2);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;">
-          <i class="fas fa-check-circle" style="font-size:30px;"></i>
+          <i class="fas ${lateInfo.late ? 'fa-exclamation-circle' : 'fa-check-circle'}" style="font-size:30px;"></i>
         </div>
-        <div style="font-size:20px;font-weight:700;margin-bottom:6px;">เข้างานสำเร็จ!</div>
+        <div style="font-size:20px;font-weight:700;margin-bottom:6px;">${lateInfo.late ? 'เข้างานแล้ว (มาสาย)' : 'เข้างานสำเร็จ!'}</div>
         <div style="font-size:36px;font-weight:700;font-family:monospace;letter-spacing:3px;">${alr.checkInTime}</div>
         <div style="font-size:12px;opacity:.8;margin-top:6px;">${fmtThai(todayStr)}</div>
+        ${lateInfo.late ? `<div style="margin-top:8px;background:rgba(0,0,0,.2);border-radius:20px;padding:4px 14px;font-size:13px;font-weight:700;display:inline-block;">⏰ สาย ${lateInfo.minutesLate} นาที</div>` : ''}
       </div>
       <!-- รายละเอียด 4 card -->
       <div style="padding:18px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
@@ -5130,11 +5704,25 @@ async function renderSupDashBody(dk){
     ${StatCard('มาสาย',lateRecs.length+' คน','fa-clock','red')}
     ${StatCard('ยังไม่มา',(subs.length-recs.length)+' คน','fa-user-clock','yellow')}
   </div>
-  ${lateRecs.length>0?`<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#991b1b;">
-    <i class="fas fa-exclamation-triangle mr-2"></i><strong>มาสาย ${lateRecs.length} คน:</strong>
-    ${recs.filter(r=>{const emp=db.employees.find(e=>e._key===r.empId)||{dept:r.dept};return checkLate(emp,r.checkInTime).late;})
-      .map(r=>{const emp=db.employees.find(e=>e._key===r.empId)||{dept:r.dept};const lt=checkLate(emp,r.checkInTime);
-        return`<span style="display:inline-block;margin:2px 4px;background:#fff;border:1px solid #fca5a5;border-radius:12px;padding:2px 8px;">${r.empName} <span style="color:#ef4444;">+${lt.minutesLate}น.</span></span>`}).join('')}
+  ${lateRecs.length>0?`
+  <div style="background:linear-gradient(135deg,#dc2626,#b91c1c);border-radius:16px;padding:16px 20px;margin-bottom:20px;box-shadow:0 4px 16px rgba(220,38,38,.25);">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+      <div style="width:40px;height:40px;background:rgba(255,255,255,.2);border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+        <i class="fas fa-bell" style="font-size:18px;color:#fff;"></i>
+      </div>
+      <div>
+        <div style="font-size:15px;font-weight:700;color:#fff;">⚠️ มาสาย ${lateRecs.length} คน วันนี้</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.8);">รวมเวลาสาย ${recs.filter(r=>{const emp=db.employees.find(e=>e._key===r.empId)||{dept:r.dept};return checkLate(emp,r.checkInTime).late;}).reduce((s,r)=>{const emp=db.employees.find(e=>e._key===r.empId)||{dept:r.dept};return s+checkLate(emp,r.checkInTime).minutesLate;},0)} นาที</div>
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;">
+      ${recs.filter(r=>{const emp=db.employees.find(e=>e._key===r.empId)||{dept:r.dept};return checkLate(emp,r.checkInTime).late;})
+        .map(r=>{const emp=db.employees.find(e=>e._key===r.empId)||{dept:r.dept};const lt=checkLate(emp,r.checkInTime);
+          return`<div style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);border-radius:12px;padding:8px 14px;min-width:0;">
+            <div style="font-size:13px;font-weight:700;color:#fff;">${r.empName}</div>
+            <div style="font-size:11px;color:rgba(255,255,255,.85);">เข้า ${r.checkInTime} · <span style="color:#fca5a5;font-weight:700;">สาย ${lt.minutesLate} นาที</span></div>
+          </div>`;}).join('')}
+    </div>
   </div>`:''}
   ${card(`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
     <div class="font-bold text-gray-700">สถานะลูกน้อง — ${fmtThai(dk)}</div>
@@ -6785,83 +7373,32 @@ async function refreshFaceSupPanel() {
 window.refreshFaceSupPanel = refreshFaceSupPanel;
 
 // =====================================================================
-//  CHECK-IN SETTINGS PAGE (Admin)
+//  FACE REGISTRATION PAGE (Admin) — แสดงเฉพาะลงทะเบียนใบหน้า
 // =====================================================================
 async function pgCheckinSettings() {
   const mc = document.getElementById('main-content');
   mc.innerHTML = `<div id="cis-body"><div class="flex justify-center py-10"><div class="loading-spinner" style="width:32px;height:32px;border-width:3px;"></div></div></div>`;
-  const data = await fbGet('/settings/checkinMode');
-  if (data) checkinMode = data;
   const el = document.getElementById('cis-body'); if (!el) return;
 
-  const modeLabel = { qr: 'QR Code', face: 'สแกนใบหน้า', both: 'ทั้งสองวิธี' };
   const faceCount = db.employees.filter(e => e.faceDescriptor).length;
 
   el.innerHTML = `
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-
-      <!-- Left: Mode setting -->
-      <div>
-        ${card(`${sHead('ตั้งค่าวิธีเช็คชื่อเข้างาน')}
-          <p class="text-sm text-gray-500 mb-5">กำหนดวิธีที่พนักงานใช้เช็คชื่อเข้า-ออกงาน ระบบจะแสดงปุ่มที่หน้าเช็คชื่อพนักงานตามการตั้งค่านี้</p>
-          <div class="space-y-3 mb-5">
-            ${[
-              {v:'qr',         icon:'fa-qrcode',        col:'#2563eb','bg':'#eff6ff','bc':'#3b82f6', title:'QR Code เท่านั้น',           desc:'หัวหน้างานสร้าง QR แล้วพนักงานสแกน — วิธีมาตรฐาน'},
-              {v:'face',       icon:'fa-smile',          col:'#7c3aed','bg':'#f5f3ff','bc':'#8b5cf6', title:'สแกนใบหน้า เท่านั้น',        desc:'ใช้ TensorFlow.js วิเคราะห์ใบหน้าในเบราว์เซอร์ ข้อมูลไม่ออกนอกระบบ'},
-              {v:'both',       icon:'fa-layer-group',    col:'#16a34a','bg':'#f0fdf4','bc':'#22c55e', title:'ทั้ง QR และใบหน้า',          desc:'พนักงานเลือกวิธีได้เองทั้งสองแบบ'},
-              {v:'gps_button', icon:'fa-map-marker-alt', col:'#dc2626','bg':'#fef2f2','bc':'#f87171', title:'กดปุ่มเข้างาน + GPS',        desc:'โหมดโรงงาน — ไม่ต้องสแกน ใช้ Device Binding ป้องกันฝากเพื่อน'},
-            ].map(opt=>`
-              <label style="display:flex;align-items:flex-start;gap:12px;padding:16px;border-radius:14px;cursor:pointer;border:2px solid ${checkinMode===opt.v?opt.bc:'#e5e7eb'};background:${checkinMode===opt.v?opt.bg:'#fff'};transition:all .2s;"
-                onclick="this.querySelector('input').checked=true;previewCIMode('${opt.v}')">
-                <input type="radio" name="ci-mode" value="${opt.v}" ${checkinMode===opt.v?'checked':''} class="mt-1" style="accent-color:${opt.col};">
-                <div>
-                  <div style="font-weight:700;color:#1e293b;display:flex;align-items:center;gap:8px;">
-                    <i class="fas ${opt.icon}" style="color:${opt.col};"></i> ${opt.title}
-                  </div>
-                  <div style="font-size:12px;color:#64748b;margin-top:4px;">${opt.desc}</div>
-                </div>
-              </label>`).join('')}
-          </div>
-          ${Btn('<i class="fas fa-save mr-1"></i>บันทึกการตั้งค่า','saveCheckinMode()','purple')}
-        `)}
-
-        <!-- GPS Settings → link to dedicated page -->
-        ${card(`${sHead('พื้นที่เช็คชื่อ')}
-          <div style="background:#ecfeff;border:1px solid #a5f3fc;border-radius:12px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-            <div>
-              <div style="font-weight:700;color:#0e7490;font-size:13px;margin-bottom:3px;">
-                <i class="fas fa-map-marked-alt" style="margin-right:6px;"></i>กำหนดพื้นที่เข้างานหลายสถานที่
-              </div>
-              <div style="font-size:12px;color:#0891b2;">
-                ปัจจุบัน ${gpsLocations.length} สถานที่ · คลิกเพื่อจัดการ
-              </div>
-            </div>
-            <button onclick="goTab('gps-locations',document.querySelector('[data-tab=\\'gps-locations\\']'))"
-              style="background:#0891b2;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;font-family:Sarabun,sans-serif;flex-shrink:0;">
-              <i class="fas fa-arrow-right" style="margin-right:5px;"></i>ไปตั้งค่า
-            </button>
-          </div>
-        `)}
-      </div>
-
-      <!-- Right: Face registration table -->
-      <div>
-        ${card(`${sHead('ลงทะเบียนใบหน้าพนักงาน',`<span class="text-xs text-gray-400">${faceCount}/${db.employees.length} คน</span>`)}
-          <div class="mb-3 p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-700">
-            <i class="fas fa-info-circle mr-1"></i>
-            คลิก <strong>ลงทะเบียนใบหน้า</strong> แล้วจ่อกล้องให้ใบหน้าพนักงานอยู่ในกรอบ ระบบจะบันทึก Face Descriptor (128 มิติ) ลง Firebase โดยอัตโนมัติ
-          </div>
-          <input type="text" id="face-reg-search" placeholder="ค้นหาชื่อ, สายงาน..." class="w-full border rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1" oninput="filterFaceRegTable(this.value)">
-          <div class="overflow-x-auto max-h-96">
-            <table class="min-w-full text-sm">
-              ${THead('พนักงาน','สายงาน','ใบหน้า','ครั้ง','จัดการ')}
-              <tbody id="face-reg-tbody">
-                ${_buildFaceRegRows(db.employees)}
-              </tbody>
-            </table>
-          </div>
-        `)}
-      </div>
+    <div class="max-w-3xl mx-auto">
+      ${card(`${sHead('ลงทะเบียนใบหน้าพนักงาน',`<span class="text-xs text-gray-400">${faceCount}/${db.employees.length} คน</span>`)}
+        <div class="mb-3 p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-700">
+          <i class="fas fa-info-circle mr-1"></i>
+          คลิก <strong>ลงทะเบียนใบหน้า</strong> แล้วจ่อกล้องให้ใบหน้าพนักงานอยู่ในกรอบ ระบบจะบันทึก Face Descriptor (128 มิติ) ลง Firebase โดยอัตโนมัติ
+        </div>
+        <input type="text" id="face-reg-search" placeholder="ค้นหาชื่อ, สายงาน..." class="w-full border rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-1" oninput="filterFaceRegTable(this.value)">
+        <div class="overflow-x-auto max-h-[70vh]">
+          <table class="min-w-full text-sm">
+            ${THead('พนักงาน','สายงาน','หัวหน้างาน','ใบหน้า','ครั้ง','จัดการ')}
+            <tbody id="face-reg-tbody">
+              ${_buildFaceRegRows(db.employees)}
+            </tbody>
+          </table>
+        </div>
+      `)}
     </div>`;
 }
 
@@ -7269,6 +7806,7 @@ function _buildFaceRegRows(emps) {
   return emps.map(e => `<tr class="hover:bg-gray-50">
     <td class="px-4 py-2.5 font-medium">${e.name}</td>
     <td class="px-4 py-2.5 text-gray-500 text-xs">${e.dept||'-'}</td>
+    <td class="px-4 py-2.5 text-gray-500 text-xs">${e.sup||'-'}</td>
     <td class="px-4 py-2.5">${e.faceDescriptor ? bdg('green','✓ ลงทะเบียนแล้ว') : bdg('red','ยังไม่ได้ลงทะเบียน')}</td>
     <td class="px-4 py-2.5">
       <div class="flex items-center gap-1">
@@ -7295,7 +7833,7 @@ window.filterFaceRegTable = q => {
   const tbody = document.getElementById('face-reg-tbody'); if (!tbody) return;
   const ql = q.toLowerCase();
   tbody.innerHTML = _buildFaceRegRows(db.employees.filter(e => !q ||
-    e.name.toLowerCase().includes(ql) || (e.dept||'').toLowerCase().includes(ql)));
+    e.name.toLowerCase().includes(ql) || (e.dept||'').toLowerCase().includes(ql) || (e.sup||'').toLowerCase().includes(ql)));
 };
 
 // =====================================================================
