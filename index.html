@@ -6876,28 +6876,13 @@ async function renderEmpHome(){
 
     <!-- Check-in button area -->
     <div style="background:linear-gradient(135deg,#e0f2fe,#bfdbfe);border-radius:24px;padding:28px 16px 20px;margin-bottom:12px;box-shadow:0 2px 12px rgba(59,130,246,.1);display:flex;flex-direction:column;align-items:center;">
-      <!-- Big center checkin button -->
-      <div style="display:flex;align-items:flex-end;justify-content:center;gap:28px;margin-bottom:18px;width:100%;">
-        <!-- Scan -->
-        <button onclick="${em==='qr'||em==='both'?'openCam()':goCheckin}" class="emp-menu-btn">
-          <div class="emp-menu-icon" style="background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.08);">
-            <i class="fas fa-expand" style="color:#3b82f6;font-size:20px;"></i>
-          </div>
-          <span class="emp-menu-label">สแกน</span>
-        </button>
-        <!-- Main GPS / Check-in button -->
+      <!-- Big center checkin button only -->
+      <div style="display:flex;align-items:center;justify-content:center;margin-bottom:18px;width:100%;">
         <button onclick="${goCheckin}" style="display:flex;flex-direction:column;align-items:center;gap:10px;cursor:pointer;border:none;background:transparent;font-family:Sarabun,sans-serif;position:relative;">
           <div style="width:90px;height:90px;border-radius:50%;background:linear-gradient(135deg,#0ea5e9,#3b82f6);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 24px rgba(14,165,233,.4),0 0 0 8px rgba(14,165,233,.15);transition:transform .15s;" onmousedown="this.style.transform='scale(.93)'" onmouseup="this.style.transform='scale(1)'" ontouchstart="this.style.transform='scale(.93)'" ontouchend="this.style.transform='scale(1)'">
             <i class="fas fa-map-marker-alt" style="color:#fff;font-size:36px;"></i>
           </div>
           <span style="font-size:14px;font-weight:700;color:#1d4ed8;">${tr&&tr.checkInTime?(tr.checkOutTime?'ออกงานแล้ว':'เข้างานแล้ว'):'เข้างาน'}</span>
-        </button>
-        <!-- Bluetooth -->
-        <button onclick="${goCheckin}" class="emp-menu-btn">
-          <div class="emp-menu-icon" style="background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.08);">
-            <i class="fab fa-bluetooth-b" style="color:#3b82f6;font-size:22px;"></i>
-          </div>
-          <span class="emp-menu-label">บีคอน</span>
         </button>
       </div>
       <!-- Location label -->
@@ -6920,20 +6905,15 @@ async function renderEmpHome(){
           <div class="emp-menu-icon" style="background:#fff7ed;"><i class="fas fa-umbrella-beach" style="color:#ea580c;"></i></div>
           <span class="emp-menu-label">ลางาน</span>
         </button>
-        <!-- เปลี่ยนกะ -->
-        <button onclick="${goCheckin}" class="emp-menu-btn">
-          <div class="emp-menu-icon" style="background:#f0fdf4;"><i class="fas fa-exchange-alt" style="color:#16a34a;"></i></div>
-          <span class="emp-menu-label">เปลี่ยนกะ</span>
-        </button>
         <!-- OT -->
         <button onclick="${goCheckin}" class="emp-menu-btn">
           <div class="emp-menu-icon" style="background:#eff6ff;"><i class="fas fa-user-clock" style="color:#2563eb;"></i></div>
           <span class="emp-menu-label">โอที</span>
         </button>
-        <!-- โควต้าการลา -->
+        <!-- ประวัติการลา -->
         <button onclick="${goCheckin}" class="emp-menu-btn">
           <div class="emp-menu-icon" style="background:#fefce8;"><i class="fas fa-file-alt" style="color:#ca8a04;"></i></div>
-          <span class="emp-menu-label">โควต้าการลา</span>
+          <span class="emp-menu-label">ประวัติการลา</span>
         </button>
         <!-- วันหยุดประจำปี -->
         <button onclick="${goCheckin}" class="emp-menu-btn">
