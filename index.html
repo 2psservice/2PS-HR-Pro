@@ -188,7 +188,7 @@ tr:nth-child(even){background:#f8fafc;}
         <span class="text-sm font-medium text-gray-700" id="hdr-name"></span>
       </div>
     </header>
-    <div class="flex-1 overflow-y-auto p-6" id="main-content"></div>
+    <div class="flex-1 overflow-y-auto" id="main-content" style="padding:12px;"></div>
   </main>
 </div>
 
@@ -833,7 +833,7 @@ const getMonths = () => {
   });
 };
 const bdg = (c,t) => `<span class="badge-${c} px-2 py-0.5 rounded text-xs font-medium">${t}</span>`;
-const card = (h,x='') => `<div class="bg-white rounded-xl shadow-sm p-6 ${x}">${h}</div>`;
+const card = (h,x='') => `<div class="bg-white rounded-xl shadow-sm ${x}" style="padding:14px;">${h}</div>`;
 const sHead = (t,b='') => `<div class="flex justify-between items-center mb-5"><h3 class="text-base font-bold text-gray-700 border-l-4 border-blue-500 pl-3">${t}</h3>${b}</div>`;
 const Btn = (lbl,fn,c='blue') => { const cl={blue:'bg-blue-600 hover:bg-blue-700',green:'bg-green-600 hover:bg-green-700',red:'bg-red-500 hover:bg-red-600',gray:'bg-gray-200 hover:bg-gray-300 text-gray-700',purple:'bg-purple-600 hover:bg-purple-700'}; return `<button onclick="${fn}" class="${cl[c]||cl.blue} ${c==='gray'?'':'text-white'} px-4 py-2 rounded-lg text-sm font-medium transition shadow-sm">${lbl}</button>`; };
 const Inp = (id,type,val,ph='',cls='') => `<input id="${id}" type="${type}" value="${val||''}" placeholder="${ph}" class="w-full border border-gray-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-400 focus:border-blue-400 outline-none ${cls}">`;
@@ -909,6 +909,7 @@ function getMenus(role){
     {tab:'emps',icon:'fas fa-users',label:'กำหนดพนักงาน'},
     {tab:'wages',icon:'fas fa-money-bill-wave',label:'ตั้งค่าค่าแรง/OT'},
     {tab:'org-chart',icon:'fas fa-project-diagram',label:'แบ่งตามหัวหน้างาน'},
+    {tab:'payslip',icon:'fas fa-file-invoice-dollar',label:'สลิปเงินเดือน',c:'text-emerald-400'},
     {div:1,label:'รายงาน'},
     {tab:'rpt-daily',icon:'fas fa-calendar-day',label:'สรุปประจำวัน'},
     {tab:'rpt-monthly',icon:'fas fa-calendar-alt',label:'สรุปประจำเดือน'},
@@ -997,7 +998,7 @@ function renderPage(tab){
   }
   const mc=document.getElementById('main-content');mc.innerHTML='';
   const map={
-    dashboard:pgDashboard,depts:pgDepts,sups:pgSups,emps:pgEmps,wages:pgWages,'org-chart':pgOrgChart,
+    dashboard:pgDashboard,depts:pgDepts,sups:pgSups,emps:pgEmps,wages:pgWages,'org-chart':pgOrgChart,payslip:pgPayslip,
     'attendance-log':pgAttendanceLog,
     'rpt-daily':pgRptDaily,'rpt-monthly':pgRptMonthly,'rpt-sup':pgRptSup,'rpt-emp':pgRptEmp,
     'manage-pwd':pgManagePwd,'checkin-settings':pgCheckinSettings,
@@ -1954,22 +1955,39 @@ function _updateLiveMapMarkers() {
 
 // ---- อัพเดทรายการด้านขวา ----
 function _updateLiveList() {
-  const listWrap = document.getElementById('live-list-wrap');
-  if (!listWrap) return;
-
   const now  = Date.now();
   const all  = Object.values(_liveTrackData).filter(d => d.lat && d.lng);
   const online = all.filter(d => _liveIsOnline(d.ts)).length;
   const listCount = document.getElementById('live-list-count');
   if (listCount) listCount.textContent = `${all.length} คน · 🟢 ${online}`;
   const sorted = [...all].sort((a,b) => {
-    // online ก่อน, นอกพื้นที่ก่อน
     const ao = _liveIsOnline(a.ts) ? 1 : 0;
     const bo = _liveIsOnline(b.ts) ? 1 : 0;
     if (ao !== bo) return bo - ao;
     if (a.inArea !== b.inArea) return a.inArea ? 1 : -1;
     return (b.ts||0) - (a.ts||0);
   });
+
+  // ── Mobile: update dropdown ──────────────────────────────────────────
+  const sel = document.getElementById('live-person-select');
+  if (sel) {
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">— เลือกพนักงาน / หัวหน้า (${sorted.length} คน) —</option>` +
+      sorted.map(d => {
+        const isOnline = _liveIsOnline(d.ts);
+        const isSup = d.role === 'supervisor';
+        const flag = d.inArea ? '✅' : '🚨';
+        const dot  = isOnline ? '🟢' : '⚫';
+        return `<option value="${d.id}" ${cur===d.id?'selected':''}>
+          ${dot} ${flag} ${isSup?'[หัวหน้า] ':''}${d.name}${d.dept?' · '+d.dept:''}
+        </option>`;
+      }).join('');
+    return; // mobile mode — no list-wrap
+  }
+
+  // ── Desktop: update side list ────────────────────────────────────────
+  const listWrap = document.getElementById('live-list-wrap');
+  if (!listWrap) return;
 
   if (!sorted.length) {
     listWrap.innerHTML = `<div style="text-align:center;padding:40px 16px;color:#94a3b8;font-size:13px;">
@@ -2369,6 +2387,8 @@ window._gtlLoad = async function() {
 
 async function pgLiveTrack() {
   const mc = document.getElementById('main-content');
+  const isMob = document.getElementById('app-screen').classList.contains('mobile-mode');
+
   mc.innerHTML = `
     <style>
       @keyframes liveMapPulse {
@@ -2376,45 +2396,63 @@ async function pgLiveTrack() {
         50%{ box-shadow:0 0 0 8px rgba(34,197,94,.2),0 3px 10px rgba(0,0,0,.4); }
       }
     </style>
+
+    <!-- Header -->
     <div style="display:flex;justify-content:space-between;align-items:center;
-      margin-bottom:12px;flex-wrap:wrap;gap:8px;">
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      margin-bottom:8px;flex-wrap:wrap;gap:6px;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <h3 style="font-size:15px;font-weight:700;color:#1e293b;display:flex;align-items:center;
           gap:8px;border-left:4px solid #10b981;padding-left:10px;margin:0;">
-          <i class="fas fa-satellite-dish" style="color:#10b981;"></i> Live GPS Tracking
+          <i class="fas fa-satellite-dish" style="color:#10b981;"></i> Live GPS
         </h3>
         <span id="live-track-count" style="background:#f1f5f9;color:#64748b;
           font-size:12px;padding:3px 10px;border-radius:20px;font-weight:600;"></span>
         <span id="live-online-count" style="background:#dcfce7;color:#15803d;
           font-size:12px;padding:3px 10px;border-radius:20px;font-weight:700;"></span>
       </div>
-      <div style="display:flex;gap:8px;align-items:center;">
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
         <span id="live-track-ts" style="font-size:11px;color:#94a3b8;"></span>
-        <div id="live-sse-badge"
-          style="background:#dcfce7;color:#15803d;border-radius:8px;padding:5px 10px;
-            font-size:11px;font-weight:700;display:flex;align-items:center;gap:5px;">
+        <div id="live-sse-badge" style="background:#dcfce7;color:#15803d;border-radius:8px;
+          padding:5px 10px;font-size:11px;font-weight:700;display:flex;align-items:center;gap:5px;">
           <span style="width:7px;height:7px;background:#22c55e;border-radius:50%;
             display:inline-block;animation:liveMapPulse 1.5s infinite;"></span>
           Realtime
         </div>
-        <button onclick="refreshLiveTrack()"
-          style="background:#10b981;color:#fff;border:none;border-radius:8px;
-            padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;
-            font-family:Sarabun,sans-serif;">
+        <button onclick="refreshLiveTrack()" style="background:#10b981;color:#fff;border:none;
+          border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;">
           <i class="fas fa-sync mr-1"></i>รีเฟรช
         </button>
-        <button id="live-fit-btn" onclick="fitAllMarkers()"
-          style="background:#f1f5f9;color:#475569;border:none;border-radius:8px;
-            padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;
-            font-family:Sarabun,sans-serif;">
-          <i class="fas fa-compress-arrows-alt mr-1"></i>Fit All
+        <button id="live-fit-btn" onclick="fitAllMarkers()" style="background:#f1f5f9;color:#475569;
+          border:none;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;">
+          <i class="fas fa-compress-arrows-alt mr-1"></i>Fit
         </button>
       </div>
     </div>
 
+    ${isMob ? `
+    <!-- Mobile: Dropdown selector -->
+    <div style="background:#fff;border-radius:12px;padding:8px 10px;margin-bottom:8px;
+      border:1px solid #e2e8f0;display:flex;align-items:center;gap:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);">
+      <i class="fas fa-user-friends" style="color:#64748b;font-size:13px;flex-shrink:0;"></i>
+      <select id="live-person-select" onchange="focusLiveMarker(this.value)"
+        style="flex:1;border:none;outline:none;font-size:13px;font-family:Sarabun,sans-serif;
+          color:#1e293b;background:transparent;cursor:pointer;min-width:0;">
+        <option value="">— เลือกพนักงาน / หัวหน้า —</option>
+      </select>
+      <span id="live-list-count" style="font-size:11px;color:#94a3b8;flex-shrink:0;"></span>
+    </div>
+    <!-- Mobile: Map full width -->
+    <div id="live-map-wrap" style="border-radius:14px;overflow:hidden;border:1px solid #e2e8f0;
+      background:#f1f5f9;position:relative;height:calc(100vh - 240px);min-height:360px;">
+      <div id="live-map-loading" style="height:100%;display:flex;align-items:center;
+        justify-content:center;color:#94a3b8;font-size:14px;">
+        <i class="fas fa-spinner fa-spin mr-2"></i>กำลังโหลดแผนที่...
+      </div>
+    </div>
+    ` : `
+    <!-- Desktop: side-by-side -->
     <div style="display:grid;grid-template-columns:1fr 300px;gap:12px;
       height:calc(100vh - 178px);min-height:500px;">
-      <!-- แผนที่ -->
       <div id="live-map-wrap" style="border-radius:14px;overflow:hidden;
         border:1px solid #e2e8f0;background:#f1f5f9;position:relative;">
         <div id="live-map-loading" style="height:100%;display:flex;align-items:center;
@@ -2422,7 +2460,6 @@ async function pgLiveTrack() {
           <i class="fas fa-spinner fa-spin mr-2"></i>กำลังโหลดแผนที่...
         </div>
       </div>
-      <!-- รายการ -->
       <div style="display:flex;flex-direction:column;gap:0;">
         <div style="font-size:12px;font-weight:700;color:#64748b;margin-bottom:8px;
           padding:0 4px;display:flex;justify-content:space-between;align-items:center;">
@@ -2437,27 +2474,24 @@ async function pgLiveTrack() {
           </div>
         </div>
       </div>
-    </div>`;
+    </div>`}`;
 
   setTimeout(async () => {
     _initLiveMap();
-    // โหลด snapshot ครั้งแรก
     const raw = await fbGet('/liveTrack').catch(()=>null);
     if (raw) {
       _liveTrackData = Object.fromEntries(
         Object.entries(raw).map(([k,v]) => [k, {id:k,...v}])
       );
       _onLiveDataChanged();
-      // fitBounds หลังโหลดครั้งแรก
       const pts = Object.values(_liveTrackData)
         .filter(d=>d.lat&&d.lng).map(d=>[d.lat,d.lng]);
       if (pts.length > 1) {
         try { _liveTrackMap.fitBounds(L.latLngBounds(pts),{padding:[40,40],maxZoom:15}); } catch(_){}
       }
     } else {
-      _onLiveDataChanged(); // render empty state
+      _onLiveDataChanged();
     }
-    // เริ่ม SSE realtime
     startLiveTrackSSE();
   }, 250);
 }
@@ -2546,11 +2580,23 @@ window.toggleLiveAuto = function() {};  // legacy — SSE handles this now
 
 function pgSups(){
   const mc=document.getElementById('main-content');
-  mc.innerHTML=card(sHead('รายชื่อหัวหน้างาน',`<div class="flex gap-2 flex-wrap">
-    <input type="text" id="ssrch" placeholder="ค้นหา..." class="border rounded-lg px-3 py-2 text-sm w-36 focus:outline-none focus:ring-1" oninput="filterSups(this.value)">
-    ${Btn('<i class="fas fa-plus mr-1"></i>เพิ่มหัวหน้างาน','addSup()')}</div>`)
-    +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','สายงาน','Username','รหัสผ่าน','ลูกน้อง','จัดการ')}
-    <tbody id="sup-tbody">${supRows(db.supervisors)}</tbody></table></div>`);
+  const isMob=document.getElementById('app-screen').classList.contains('mobile-mode');
+  mc.innerHTML=`<div style="display:flex;flex-direction:column;gap:10px;">
+    <div style="background:#fff;border-radius:14px;padding:12px 14px;box-shadow:0 1px 4px rgba(0,0,0,.07);">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <h3 style="font-size:14px;font-weight:700;color:#374151;border-left:4px solid #3b82f6;padding-left:10px;">รายชื่อหัวหน้างาน</h3>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+          <input type="text" id="ssrch" placeholder="ค้นหา..." oninput="filterSups(this.value)"
+            style="border:1px solid #e5e7eb;border-radius:8px;padding:7px 11px;font-size:13px;width:130px;font-family:Sarabun,sans-serif;outline:none;">
+          ${Btn('<i class="fas fa-plus"></i> เพิ่ม','addSup()')}
+        </div>
+      </div>
+      ${isMob
+        ? `<div id="sup-tbody" style="display:flex;flex-direction:column;gap:8px;">${supCards(db.supervisors)}</div>`
+        : `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">${THead('รหัส','ชื่อ-นามสกุล','สายงาน','Username','รหัสผ่าน','ลูกน้อง','จัดการ')}<tbody id="sup-tbody">${supRows(db.supervisors)}</tbody></table></div>`
+      }
+    </div>
+  </div>`;
 }
 
 function supRows(sups){
@@ -2584,15 +2630,41 @@ function supRows(sups){
   }).join('');
 }
 
+function supCards(sups){
+  if(!sups.length) return '<div style="text-align:center;padding:20px;color:#9ca3af;font-size:13px;">ไม่มีข้อมูล</div>';
+  return sups.map(s=>{
+    const subs=db.employees.filter(e=>empBelongsToSup(e,s._key)).length;
+    const safePwd=(s.password||'').replace(/"/g,'&quot;');
+    return`<div style="background:#f8fafc;border-radius:12px;padding:12px 14px;border:1px solid #e5e7eb;" id="sup-row-${s._key}">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <div>
+          <div style="font-size:14px;font-weight:700;color:#1e293b;">${s.name}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px;">${s.dept||'-'} · ${s.username} · ${bdg('blue',subs+' คน')}</div>
+        </div>
+        <button onclick="delSup('${s._key}')" style="color:#ef4444;font-size:12px;background:none;border:none;cursor:pointer;padding:4px 8px;">ลบ</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="font-size:11px;color:#64748b;min-width:52px;">รหัสผ่าน</span>
+        <input id="sup-pwd-inp-${s._key}" type="text" value="${safePwd}"
+          style="flex:1;border:1.5px solid #e2e8f0;border-radius:8px;padding:6px 10px;font-family:monospace;font-size:12px;color:#1e293b;outline:none;background:#fff;min-width:0;"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();window.saveSupPwdInline('${s._key}',this.value);}">
+        <button onclick="window.saveSupPwdInline('${s._key}',document.getElementById('sup-pwd-inp-${s._key}').value)"
+          style="background:#6366f1;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer;flex-shrink:0;">💾</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 window.filterSups = q => {
   const tbody = document.getElementById('sup-tbody'); if(!tbody) return;
   const ql = q.toLowerCase();
+  const isMobS=document.getElementById('app-screen').classList.contains('mobile-mode');
   const filtered = db.supervisors.filter(s =>
     !q || s.name.toLowerCase().includes(ql) ||
     (s.username||'').toLowerCase().includes(ql) ||
     (s.dept||'').toLowerCase().includes(ql)
   );
-  tbody.innerHTML = supRows(filtered);
+  tbody.innerHTML = isMobS ? supCards(filtered) : supRows(filtered);
 };
 
 
@@ -2863,15 +2935,75 @@ window.openSupTimeline = async function(supId, supName) {
 // =====================================================================
 function pgEmps(filterSupKey=''){
   const mc=document.getElementById('main-content');
+  const isMob=document.getElementById('app-screen').classList.contains('mobile-mode');
   const emps=filterSupKey?db.employees.filter(e=>empBelongsToSup(e,filterSupKey)):db.employees;
-  mc.innerHTML=card(sHead('รายชื่อพนักงาน',`<div class="flex gap-2 flex-wrap">
-    <input type="text" id="esrch" placeholder="ค้นหา..." class="border rounded-lg px-3 py-2 text-sm w-36 focus:outline-none focus:ring-1" oninput="filterEmps(this.value,'${filterSupKey}')">
-    ${!filterSupKey?`
-    <button onclick="downloadEmpTemplate()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg text-sm flex items-center gap-1.5 border"><i class="fas fa-download text-green-600"></i>Template</button>
-    <label class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg text-sm flex items-center gap-1.5 cursor-pointer shadow-sm"><i class="fas fa-upload"></i>Import Excel<input type="file" accept=".xlsx,.xls" style="display:none" onchange="importEmpExcel(this)"></label>`:''}
-    ${Btn('<i class="fas fa-plus mr-1"></i>เพิ่มพนักงาน','openEmpMod(null)')}</div>`)
-    +`<div class="overflow-x-auto"><table class="min-w-full text-sm">${THead('รหัส','ชื่อ-นามสกุล','เบอร์','สายงาน','หัวหน้างาน','ค่าแรง','OT/ชม.','Username','รหัสผ่าน','<span style="color:#dc2626;">เบิกล่วงหน้า</span>','จัดการ')}
-    <tbody id="emp-tbody">${empRows(emps)}</tbody></table></div>`);
+  mc.innerHTML=`<div style="display:flex;flex-direction:column;gap:10px;">
+    <div style="background:#fff;border-radius:14px;padding:12px 14px;box-shadow:0 1px 4px rgba(0,0,0,.07);">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <h3 style="font-size:14px;font-weight:700;color:#374151;border-left:4px solid #34d399;padding-left:10px;">รายชื่อพนักงาน</h3>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+          <input type="text" id="esrch" placeholder="ค้นหา..." oninput="filterEmps(this.value,'${filterSupKey}')"
+            style="border:1px solid #e5e7eb;border-radius:8px;padding:7px 11px;font-size:13px;width:130px;font-family:Sarabun,sans-serif;outline:none;">
+          ${!filterSupKey?`<button onclick="downloadEmpTemplate()" style="background:#f1f5f9;border:1px solid #e2e8f0;color:#374151;border-radius:8px;padding:7px 10px;font-size:12px;cursor:pointer;font-family:Sarabun,sans-serif;display:flex;align-items:center;gap:4px;"><i class="fas fa-download" style="color:#16a34a;"></i>Template</button>
+          <label style="background:#4f46e5;color:#fff;border-radius:8px;padding:7px 10px;font-size:12px;cursor:pointer;font-family:Sarabun,sans-serif;display:flex;align-items:center;gap:4px;"><i class="fas fa-upload"></i>นำเข้า<input type="file" accept=".xlsx,.xls" style="display:none" onchange="importEmpExcel(this)"></label>`:''}
+          ${Btn('<i class="fas fa-plus"></i> เพิ่ม','openEmpMod(null)')}
+        </div>
+      </div>
+      ${isMob
+        ? `<div id="emp-tbody" style="display:flex;flex-direction:column;gap:8px;">${empCards(emps, filterSupKey)}</div>`
+        : `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">${THead('รหัส','ชื่อ-นามสกุล','เบอร์','สายงาน','หัวหน้างาน','ค่าแรง','OT/ชม.','Username','รหัสผ่าน','<span style="color:#dc2626;">เบิกล่วงหน้า</span>','จัดการ')}<tbody id="emp-tbody">${empRows(emps)}</tbody></table></div>`
+      }
+    </div>
+  </div>`;
+}
+
+// ---- Mobile card view for employees ----
+function empCards(emps, filterSupKey=''){
+  if(!emps.length) return '<div style="text-align:center;padding:20px;color:#9ca3af;font-size:13px;">ไม่มีข้อมูล</div>';
+  return emps.map(e=>{
+    const total=sumAdvances(e._key);
+    const safePwd=(e.password||'').replace(/"/g,'&quot;');
+    return`<div style="background:#f8fafc;border-radius:12px;padding:12px 14px;border:1px solid #e5e7eb;" id="emp-row-${e._key}">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:14px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${e.name}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px;">${e._key} · ${e.dept||'-'} · ${e.sup||'-'}</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;margin-left:8px;">
+          <button onclick="openEmpMod('${e._key}')" style="background:#eff6ff;color:#1d4ed8;border:none;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;font-family:Sarabun,sans-serif;">แก้ไข</button>
+          <button onclick="delEmp('${e._key}')" style="background:#fff5f5;color:#dc2626;border:none;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;font-family:Sarabun,sans-serif;">ลบ</button>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;">
+        <div style="display:flex;align-items:center;gap:6px;background:#fff;border-radius:8px;padding:6px 8px;border:1px solid #d1fae5;">
+          <span style="color:#64748b;min-width:46px;">ค่าแรง</span>
+          <input type="number" value="${e.wage||''}" id="emp-wage-${e._key}" min="0"
+            style="flex:1;border:none;outline:none;font-size:12px;font-weight:700;color:#15803d;text-align:right;background:transparent;min-width:0;"
+            onchange="saveInlineWage('${e._key}',this.value)">
+          <span style="color:#9ca3af;font-size:10px;">บาท</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;background:#fff;border-radius:8px;padding:6px 8px;border:1px solid #fde68a;">
+          <span style="color:#64748b;min-width:30px;">OT</span>
+          <input type="number" value="${e.otRate||''}" id="emp-ot-${e._key}" min="0"
+            style="flex:1;border:none;outline:none;font-size:12px;font-weight:700;color:#92400e;text-align:right;background:transparent;min-width:0;"
+            onchange="saveInlineOTRate('${e._key}',this.value)">
+          <span style="color:#9ca3af;font-size:10px;">/ชม.</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+        <span style="font-size:11px;color:#64748b;min-width:52px;">รหัสผ่าน</span>
+        <input id="emp-pwd-inp-${e._key}" type="text" value="${safePwd}"
+          style="flex:1;border:1.5px solid #e2e8f0;border-radius:8px;padding:6px 10px;font-family:monospace;font-size:12px;color:#1e293b;outline:none;background:#fff;min-width:0;"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();window.saveEmpPwdInline('${e._key}',this.value);}">
+        <button onclick="window.saveEmpPwdInline('${e._key}',document.getElementById('emp-pwd-inp-${e._key}').value)"
+          style="background:#6366f1;color:#fff;border:none;border-radius:8px;padding:7px 11px;font-size:13px;cursor:pointer;flex-shrink:0;">💾</button>
+        <button onclick="openAdvanceModal('${e._key}')"
+          style="${total>0?'background:#fee2e2;color:#dc2626;border:1px solid #fca5a5;':'background:#f1f5f9;color:#94a3b8;border:1px solid #e2e8f0;'}border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:Sarabun,sans-serif;flex-shrink:0;">
+          ${total>0?'฿'+total.toLocaleString():'+เบิก'}
+        </button>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 // ---- Download Template Excel ----
@@ -3592,8 +3724,10 @@ window.saveAdminPwd = async function(empKey) {
 };
 window.filterEmps=(q,fs)=>{
   const tbody=document.getElementById('emp-tbody');if(!tbody)return;
+  const isMob=document.getElementById('app-screen').classList.contains('mobile-mode');
   const base=fs?db.employees.filter(e=>empBelongsToSup(e,fs)):db.employees;
-  tbody.innerHTML=empRows(base.filter(e=>!q||e.name.toLowerCase().includes(q.toLowerCase())||e._key.toLowerCase().includes(q.toLowerCase())));
+  const filtered=base.filter(e=>!q||e.name.toLowerCase().includes(q.toLowerCase())||e._key.toLowerCase().includes(q.toLowerCase()));
+  tbody.innerHTML=isMob?empCards(filtered,fs||''):empRows(filtered);
 };
 window.openEmpMod=function(key){
   const e=key?db.employees.find(x=>x._key===key):null;
@@ -10813,7 +10947,1077 @@ window.adminPreviewEmp = async function(empKey) {
   </div>`;
 };
 
+
+// =====================================================================
+//  PAYSLIP PAGE — สลิปเงินเดือน
+// =====================================================================
+const PAYSLIP_FIELDS_DEFAULT = {
+  income: {
+    base:       { label:'เงินเดือน/ค่าแรง',  en:'Base Salary',         on:true  },
+    ot:         { label:'ค่าล่วงเวลา (OT)',   en:'OT Lump Sum',         on:true  },
+    bonus:      { label:'โบนัส',              en:'Bonus',               on:true  },
+    food:       { label:'ค่าอาหาร',           en:'Food Allowance',      on:true  },
+    incentive:  { label:'เบี้ยขยัน',          en:'Incentive Allowance', on:true  },
+    travel:     { label:'ค่าเดินทาง',         en:'Travelling Allowance',on:true  },
+    leader:     { label:'ค่าตำแหน่ง',         en:'Team Leader',         on:true  },
+    phone:      { label:'ค่าโทรศัพท์',        en:'Mobile Allowance',    on:true  },
+    welfare:    { label:'สวัสดิการอื่นๆ',      en:'Other Welfare',       on:true  },
+  },
+  deduct: {
+    tax:        { label:'ภาษี',               en:'TAX',                 on:true  },
+    sso:        { label:'ประกันสังคม',         en:'Social Security',     on:true  },
+    pf:         { label:'กองทุนสำรองเลี้ยงชีพ',en:'Provident Fund',      on:true  },
+    absent:     { label:'ขาดงาน/ลาเกินสิทธิ', en:'Absent / Over Leave', on:true  },
+    other:      { label:'เงินกู้/เงินหักอื่นๆ',en:'Other Deduct',        on:false },
+  }
+};
+
+let payslipFields = JSON.parse(JSON.stringify(PAYSLIP_FIELDS_DEFAULT));
+
+async function pgPayslip() {
+  const mc = document.getElementById('main-content');
+  mc.style.background = '';
+
+  // Load saved settings from Firebase
+  try {
+    const saved = await fbGet('/settings/payslipFields');
+    if (saved && typeof saved === 'object') {
+      ['income','deduct'].forEach(g => {
+        if (saved[g]) Object.keys(saved[g]).forEach(k => {
+          if (payslipFields[g][k]) payslipFields[g][k].on = !!saved[g][k].on;
+        });
+      });
+    }
+  } catch(_) {}
+
+  mc.innerHTML = `
+  <div style="padding:20px 24px 60px;">
+
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:24px;">
+      <div>
+        <div style="font-size:20px;font-weight:700;color:#1d1d1f;letter-spacing:-0.4px;">สลิปเงินเดือน</div>
+        <div style="font-size:12px;color:#86868b;margin-top:2px;">ตั้งค่า ออก PDF และจัดการสลิปพนักงาน</div>
+      </div>
+    </div>
+
+    <!-- 2 col layout: left=settings, right=generate -->
+    <div style="display:grid;grid-template-columns:400px 1fr;gap:20px;align-items:start;">
+
+      <!-- ===== LEFT: Settings ===== -->
+      <div>
+        <div style="background:#fff;border-radius:18px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.07),0 0 0 1px rgba(0,0,0,.05);">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;">
+            <div style="width:28px;height:28px;border-radius:8px;background:rgba(0,113,227,.1);display:flex;align-items:center;justify-content:center;">
+              <i class="fas fa-sliders-h" style="font-size:12px;color:#0071e3;"></i>
+            </div>
+            <span style="font-size:14px;font-weight:600;color:#1d1d1f;">ตั้งค่าการแสดงผลสลิป (E-Slip)</span>
+          </div>
+          <div style="font-size:12px;color:#86868b;margin-bottom:14px;padding:10px 12px;background:#f5f5f7;border-radius:10px;">
+            <i class="fas fa-info-circle" style="margin-right:6px;color:#0071e3;"></i>
+            เลือกรายการเงินได้และเงินหักที่จะแสดงบน PDF สลิป (มีผลกับพนักงานทุกคน)
+          </div>
+
+          <!-- Income fields -->
+          <div style="font-size:11px;font-weight:700;color:#30d158;letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">
+            <i class="fas fa-plus-circle" style="margin-right:5px;"></i>เงินได้ (Income)
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px;" id="pf-income">
+            ${Object.entries(payslipFields.income).map(([k,f])=>`
+            <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;background:${f.on?'rgba(48,209,88,.07)':'#f5f5f7'};border:1px solid ${f.on?'rgba(48,209,88,.3)':'#e5e5ea'};cursor:pointer;transition:all .15s;" id="pfl-income-${k}">
+              <input type="checkbox" id="pfc-income-${k}" ${f.on?'checked':''} onchange="togglePayslipField('income','${k}',this.checked)"
+                style="width:16px;height:16px;accent-color:#30d158;cursor:pointer;flex-shrink:0;">
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:13px;font-weight:600;color:#1d1d1f;">${f.label}</div>
+                <div style="font-size:11px;color:#86868b;">${f.en}</div>
+              </div>
+              <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;background:${f.on?'rgba(48,209,88,.15)':'#e5e5ea'};color:${f.on?'#248a3d':'#86868b'};" id="pfb-income-${k}">${f.on?'แสดง':'ซ่อน'}</span>
+            </label>`).join('')}
+          </div>
+
+          <!-- Deduct fields -->
+          <div style="font-size:11px;font-weight:700;color:#ff3b30;letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">
+            <i class="fas fa-minus-circle" style="margin-right:5px;"></i>เงินหัก (Deductions)
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:20px;" id="pf-deduct">
+            ${Object.entries(payslipFields.deduct).map(([k,f])=>`
+            <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;background:${f.on?'rgba(255,59,48,.06)':'#f5f5f7'};border:1px solid ${f.on?'rgba(255,59,48,.25)':'#e5e5ea'};cursor:pointer;transition:all .15s;" id="pfl-deduct-${k}">
+              <input type="checkbox" id="pfc-deduct-${k}" ${f.on?'checked':''} onchange="togglePayslipField('deduct','${k}',this.checked)"
+                style="width:16px;height:16px;accent-color:#ff3b30;cursor:pointer;flex-shrink:0;">
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:13px;font-weight:600;color:#1d1d1f;">${f.label}</div>
+                <div style="font-size:11px;color:#86868b;">${f.en}</div>
+              </div>
+              <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;background:${f.on?'rgba(255,59,48,.12)':'#e5e5ea'};color:${f.on?'#d70015':'#86868b'};" id="pfb-deduct-${k}">${f.on?'แสดง':'ซ่อน'}</span>
+            </label>`).join('')}
+          </div>
+
+          <!-- Save button -->
+          <button onclick="savePayslipSettings()"
+            style="width:100%;background:#0071e3;color:#fff;border:none;border-radius:12px;padding:12px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px;transition:background .15s;"
+            onmouseover="this.style.background='#0077ed'" onmouseout="this.style.background='#0071e3'"
+            id="save-pf-btn">
+            <i class="fas fa-save"></i> บันทึกการตั้งค่า
+          </button>
+        </div>
+      </div>
+
+      <!-- ===== RIGHT: Generate + Preview ===== -->
+      <div style="display:flex;flex-direction:column;gap:16px;">
+
+        <!-- Generate card -->
+        <div style="background:#fff;border-radius:18px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.07),0 0 0 1px rgba(0,0,0,.05);">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;">
+            <div style="width:28px;height:28px;border-radius:8px;background:rgba(52,199,89,.12);display:flex;align-items:center;justify-content:center;">
+              <i class="fas fa-file-pdf" style="font-size:12px;color:#30d158;"></i>
+            </div>
+            <span style="font-size:14px;font-weight:600;color:#1d1d1f;">ออกสลิปเงินเดือน PDF</span>
+          </div>
+
+          <!-- ===== MONTH/YEAR PICKER ===== -->
+          <div style="margin-bottom:16px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+              <div style="font-size:12px;font-weight:600;color:#86868b;">เลือกเดือน / ปี</div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <button onclick="psChangeYear(-1)"
+                  style="width:26px;height:26px;border:1px solid #e5e5ea;border-radius:8px;background:#f5f5f7;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;">&#8249;</button>
+                <span id="ps-year-label" style="font-size:13px;font-weight:700;color:#1d1d1f;min-width:80px;text-align:center;">${parseInt(todayStr.slice(0,4))+543} (${todayStr.slice(0,4)})</span>
+                <button onclick="psChangeYear(1)"
+                  style="width:26px;height:26px;border:1px solid #e5e5ea;border-radius:8px;background:#f5f5f7;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;">&#8250;</button>
+              </div>
+            </div>
+            <div id="ps-month-grid" style="display:grid;grid-template-columns:repeat(6,1fr);gap:5px;margin-bottom:10px;">
+              ${['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'].map((m,i)=>{
+                const mm = String(i+1).padStart(2,'0');
+                const isSelected = todayStr.slice(5,7) === mm;
+                return `<button id="psmb-${mm}" onclick="psSelectMonth('${mm}')"
+                  style="padding:6px 2px;border:1px solid ${isSelected?'#0071e3':'#e5e5ea'};border-radius:8px;background:${isSelected?'#0071e3':'#f5f5f7'};color:${isSelected?'#fff':'#1d1d1f'};font-size:11px;font-weight:${isSelected?'700':'500'};cursor:pointer;font-family:inherit;transition:all .12s;">${m}</button>`;
+              }).join('')}
+            </div>
+            <input type="hidden" id="ps-month" value="${todayStr.slice(0,7)}">
+          </div>
+          <!-- Employee picker -->
+          <div style="margin-bottom:16px;">
+            <div style="font-size:12px;font-weight:500;color:#86868b;margin-bottom:6px;">พนักงาน</div>
+            <select id="ps-emp"
+              style="width:100%;padding:9px 12px;border:1px solid #e5e5ea;border-radius:10px;font-size:13px;font-family:inherit;outline:none;background:#f5f5f7;cursor:pointer;box-sizing:border-box;">
+              <option value="">-- ทั้งหมด --</option>
+              ${db.employees.map(e=>`<option value="${e._key}">${e.name} (${e.dept||'-'})</option>`).join('')}
+            </select>
+          </div>
+
+          <!-- ปุ่มดึงข้อมูล + action -->
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+            <button onclick="fetchAndEditPayslip()"
+              style="flex:1;background:linear-gradient(135deg,#0071e3,#0077ed);color:#fff;border:none;border-radius:12px;padding:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:7px;transition:opacity .15s;min-width:160px;"
+              onmouseover="this.style.opacity='.88'" onmouseout="this.style.opacity='1'"
+              id="fetch-slip-btn">
+              <i class="fas fa-database"></i> ดึงข้อมูลเงินเดือน
+            </button>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button onclick="previewPayslip()"
+              style="flex:1;background:#f5f5f7;color:#1d1d1f;border:1px solid #e5e5ea;border-radius:12px;padding:10px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px;"
+              onmouseover="this.style.background='#ebebed'" onmouseout="this.style.background='#f5f5f7'">
+              <i class="fas fa-eye"></i> ดูตัวอย่าง
+            </button>
+            <button onclick="downloadPayslipPDF()"
+              style="flex:2;background:#1d1d1f;color:#fff;border:none;border-radius:12px;padding:10px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px;"
+              onmouseover="this.style.background='#333'" onmouseout="this.style.background='#1d1d1f'">
+              <i class="fas fa-download"></i> Download PDF
+            </button>
+          </div>
+        </div>
+
+        <!-- ===== EDITABLE PAYSLIP TABLE ===== -->
+        <div id="ps-edit-table-area" style="display:none;"></div>
+
+        <!-- Upload / Import section -->
+        <div style="background:#fff;border-radius:18px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.07),0 0 0 1px rgba(0,0,0,.05);">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+            <div style="width:28px;height:28px;border-radius:8px;background:rgba(191,90,242,.1);display:flex;align-items:center;justify-content:center;">
+              <i class="fas fa-upload" style="font-size:12px;color:#bf5af2;"></i>
+            </div>
+            <span style="font-size:14px;font-weight:600;color:#1d1d1f;">นำเข้าสลิปแบบฟอร์ม (Import Form)</span>
+          </div>
+          <div style="font-size:12px;color:#86868b;margin-bottom:14px;">อัปโหลดไฟล์ Excel (.xlsx) หรือ CSV เพื่อนำเข้าข้อมูลสลิปแบบกำหนดเอง</div>
+          <div id="ps-upload-zone"
+            style="border:2px dashed #d1d1d6;border-radius:14px;padding:28px 20px;text-align:center;cursor:pointer;transition:all .2s;background:#fafafa;"
+            onclick="document.getElementById('ps-file-input').click()"
+            ondragover="event.preventDefault();this.style.borderColor='#bf5af2';this.style.background='#fdf5ff';"
+            ondragleave="this.style.borderColor='#d1d1d6';this.style.background='#fafafa';"
+            ondrop="handlePayslipDrop(event)">
+            <i class="fas fa-cloud-upload-alt" style="font-size:28px;color:#bf5af2;margin-bottom:8px;display:block;"></i>
+            <div style="font-size:13px;font-weight:600;color:#1d1d1f;">ลากไฟล์มาวาง หรือคลิกเพื่อเลือกไฟล์</div>
+            <div style="font-size:11px;color:#86868b;margin-top:4px;">รองรับ .xlsx, .csv</div>
+          </div>
+          <input type="file" id="ps-file-input" accept=".xlsx,.csv" style="display:none;" onchange="handlePayslipUpload(this)">
+          <div id="ps-upload-result" style="margin-top:12px;display:none;"></div>
+
+          <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;">
+            <button onclick="downloadPayslipTemplate()"
+              style="flex:1;background:#f5f5f7;color:#1d1d1f;border:1px solid #e5e5ea;border-radius:12px;padding:10px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px;"
+              onmouseover="this.style.background='#ebebed'" onmouseout="this.style.background='#f5f5f7'">
+              <i class="fas fa-file-excel" style="color:#30d158;"></i> Download Template
+            </button>
+          </div>
+        </div>
+
+        <!-- Preview area -->
+        <div id="ps-preview-area" style="display:none;"></div>
+
+      </div>
+    </div>
+  </div>`;
+}
+
+window.togglePayslipField = function(group, key, val) {
+  payslipFields[group][key].on = val;
+  const lbl = document.getElementById('pfl-'+group+'-'+key);
+  const badge = document.getElementById('pfb-'+group+'-'+key);
+  if (!lbl || !badge) return;
+  const isIncome = group === 'income';
+  lbl.style.background = val ? (isIncome ? 'rgba(48,209,88,.07)' : 'rgba(255,59,48,.06)') : '#f5f5f7';
+  lbl.style.borderColor = val ? (isIncome ? 'rgba(48,209,88,.3)' : 'rgba(255,59,48,.25)') : '#e5e5ea';
+  badge.style.background = val ? (isIncome ? 'rgba(48,209,88,.15)' : 'rgba(255,59,48,.12)') : '#e5e5ea';
+  badge.style.color = val ? (isIncome ? '#248a3d' : '#d70015') : '#86868b';
+  badge.textContent = val ? 'แสดง' : 'ซ่อน';
+};
+
+window.savePayslipSettings = async function() {
+  const btn = document.getElementById('save-pf-btn');
+  const orig = btn.innerHTML;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> กำลังบันทึก...';
+  btn.disabled = true;
+  const toSave = {};
+  ['income','deduct'].forEach(g => {
+    toSave[g] = {};
+    Object.entries(payslipFields[g]).forEach(([k,f]) => { toSave[g][k] = { on: f.on }; });
+  });
+  await fbSet('/settings/payslipFields', toSave);
+  btn.innerHTML = '<i class="fas fa-check"></i> บันทึกแล้ว!';
+  btn.style.background = '#30d158';
+  setTimeout(() => { btn.innerHTML = orig; btn.style.background = '#0071e3'; btn.disabled = false; }, 2000);
+};
+
+// ── compute monthly summary per employee ──────────────────────────────
+async function getPayslipData(empKey, ym) {
+  await loadAttendanceMonth(ym);
+  const recs = [];
+  Object.entries(db.attendance).forEach(([dk, bucket]) => {
+    if (!dk.startsWith(ym)) return;
+    const r = Object.values(bucket || {}).find(x => x.empId === empKey);
+    if (r) recs.push({ ...r, dk });
+  });
+  const emp = db.employees.find(e => e._key === empKey) || {};
+  const sup = db.supervisors.find(s => s._key === emp.supId || db.employees.find(e=>e._key===empKey)?.supId===s._key) || {};
+
+  // Aggregate
+  const base    = recs.reduce((s,r) => s + (r.wage||0), 0);
+  const ot      = recs.reduce((s,r) => s + (r.otPay||0), 0);
+  const otHours = recs.reduce((s,r) => s + (r.otHours||0), 0);
+  const bonus   = recs.reduce((s,r) => s + (r.bonus||0), 0);
+  const food    = recs.reduce((s,r) => s + (r.food||0), 0);
+  const incentive = recs.reduce((s,r) => s + (r.incentive||0), 0);
+  const travel  = recs.reduce((s,r) => s + (r.travel||0), 0);
+  const leader  = recs.reduce((s,r) => s + (r.leader||0), 0);
+  const phone   = recs.reduce((s,r) => s + (r.phone||0), 0);
+  const welfare = recs.reduce((s,r) => s + (r.welfare||0), 0);
+  const tax     = recs.reduce((s,r) => s + (r.tax||0), 0);
+  const sso     = recs.reduce((s,r) => s + (r.sso||0), 0);
+  const pf      = recs.reduce((s,r) => s + (r.pf||0), 0);
+  const absent  = recs.reduce((s,r) => s + (r.absentDeduct||0), 0);
+  const other   = recs.reduce((s,r) => s + (r.otherDeduct||0), 0);
+
+  const income = ['base','ot','bonus','food','incentive','travel','leader','phone','welfare']
+    .filter(k => payslipFields.income[k]?.on)
+    .reduce((s, k) => s + ({base,ot,bonus,food,incentive,travel,leader,phone,welfare}[k]||0), 0);
+  const deduct = ['tax','sso','pf','absent','other']
+    .filter(k => payslipFields.deduct[k]?.on)
+    .reduce((s, k) => s + ({tax,sso,pf,absent,other}[k]||0), 0);
+
+  const [y, m] = ym.split('-');
+  const monthTH = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'][parseInt(m)-1];
+  const periodStr = monthTH + ' ' + (parseInt(y)+543);
+
+  return { emp, sup, recs, base, ot, otHours, bonus, food, incentive, travel, leader, phone, welfare,
+           tax, sso, pf, absent, other, income, deduct, net: income - deduct, periodStr, ym };
+}
+
+// ── HTML preview ──────────────────────────────────────────────────────
+function buildPayslipHTML(d, compact=false) {
+  const F  = (v) => (v||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const pf = payslipFields;
+  const dept = db.departments?.find?.(dep=>dep.name===d.emp.dept)||{};
+
+  const P  = compact ? '5px 6px' : '7px 10px';
+  const FS = compact ? '10px' : '11px';
+  const FV = compact ? '11px' : '12px';
+
+  // ── Enabled fields only ───────────────────────────────────────────────
+  const INC_ALL = [
+    {key:'base',      label:'เงินเดือน/ค่าแรง',  en:'Base Salary',          val:d.base},
+    {key:'ot',        label:'ค่าล่วงเวลาเหมา',    en:'OT Lump Sum',          val:d.ot},
+    {key:'bonus',     label:'โบนัส',              en:'Bonus',                val:d.bonus},
+    {key:'food',      label:'ค่าอาหาร',           en:'Food Allowance',       val:d.food},
+    {key:'incentive', label:'เบี้ยขยัน',          en:'Incentive Allowance',  val:d.incentive},
+    {key:'travel',    label:'ค่าเดินทาง',         en:'Travelling Allowance', val:d.travel},
+    {key:'leader',    label:'ค่าตำแหน่ง',         en:'Team Leader',          val:d.leader},
+    {key:'phone',     label:'ค่าโทรศัพท์',        en:'Mobile Allowance',     val:d.phone},
+    {key:'welfare',   label:'สวัสดิการอื่นๆ',     en:'Other Welfare',        val:d.welfare},
+  ].filter(r => pf.income[r.key]?.on);
+
+  const DED_ALL = [
+    {key:'tax',    label:'ภาษี',                  en:'Income TAX',           val:d.tax},
+    {key:'sso',    label:'ประกันสังคม',            en:'Social Security',      val:d.sso},
+    {key:'pf',     label:'กองทุนสำรองเลี้ยงชีพ', en:'Provident Fund',       val:d.pf},
+    {key:'absent', label:'ขาดงาน/ลาเกินสิทธิ',   en:'Absent / Over Leave',  val:d.absent},
+    {key:'other',  label:'เงินกู้/เงินหักอื่นๆ', en:'Other Deduct',         val:d.other},
+  ].filter(r => pf.deduct[r.key]?.on);
+
+  // ── Split fields into 2 rows when n > 5 ──────────────────────────────
+  function splitRows(arr) {
+    if (!arr.length) return [[], []];
+    if (arr.length <= 5) return [arr, []];
+    const mid = Math.ceil(arr.length / 2);
+    return [arr.slice(0, mid), arr.slice(mid)];
+  }
+
+  function makeIncTable(fields) {
+    if (!fields.length) return '<div style="padding:8px;text-align:center;font-size:11px;color:#9ca3af;border:1px solid #d1d5db;">ไม่มีรายการเงินได้</div>';
+    const [r1, r2] = splitRows(fields);
+    const twoRow = r2.length > 0;
+    const thS = 'padding:'+P+';text-align:center;font-size:'+FS+';font-weight:700;border:1px solid #bfdbfe;background:#dbeafe;color:#1e40af;';
+    const tdS = 'padding:'+P+';text-align:center;border:1px solid #d1d5db;font-size:'+FV+';font-weight:700;color:#1d4ed8;';
+    let html = '<table style="width:100%;border-collapse:collapse;table-layout:fixed;">';
+    html += '<tr>' + r1.map(f=>'<th style="'+thS+'">'+f.label+'<br><span style="font-weight:400;font-size:9px;">'+f.en+'</span></th>').join('') + '</tr>';
+    html += '<tr style="background:#f5f8ff;">' + r1.map(f=>'<td style="'+tdS+'">'+F(f.val)+'</td>').join('') + '</tr>';
+    if (twoRow) {
+      const pad = r1.length - r2.length;
+      const padTh = pad > 0 ? '<th colspan="'+pad+'" style="'+thS+'"></th>' : '';
+      const padTd = pad > 0 ? '<td colspan="'+pad+'" style="border:1px solid #d1d5db;background:#f5f8ff;"></td>' : '';
+      html += '<tr>' + r2.map(f=>'<th style="'+thS+'">'+f.label+'<br><span style="font-weight:400;font-size:9px;">'+f.en+'</span></th>').join('') + padTh + '</tr>';
+      html += '<tr style="background:#f5f8ff;">' + r2.map(f=>'<td style="'+tdS+'">'+F(f.val)+'</td>').join('') + padTd + '</tr>';
+    }
+    html += '</table>';
+    return html;
+  }
+
+  function makeDedTable(fields) {
+    if (!fields.length) return '<div style="padding:8px;text-align:center;font-size:11px;color:#9ca3af;border:1px solid #d1d5db;">ไม่มีรายการเงินหัก</div>';
+    const [r1, r2] = splitRows(fields);
+    const twoRow = r2.length > 0;
+    const thS = 'padding:'+P+';text-align:center;font-size:'+FS+';font-weight:700;border:1px solid #fecaca;background:#fee2e2;color:#b91c1c;';
+    const tdS = 'padding:'+P+';text-align:center;border:1px solid #d1d5db;font-size:'+FV+';font-weight:700;color:#dc2626;';
+    let html = '<table style="width:100%;border-collapse:collapse;table-layout:fixed;">';
+    html += '<tr>' + r1.map(f=>'<th style="'+thS+'">'+f.label+'<br><span style="font-weight:400;font-size:9px;">'+f.en+'</span></th>').join('') + '</tr>';
+    html += '<tr style="background:#fff8f8;">' + r1.map(f=>'<td style="'+tdS+'">'+F(f.val)+'</td>').join('') + '</tr>';
+    if (twoRow) {
+      const pad = r1.length - r2.length;
+      const padTh = pad > 0 ? '<th colspan="'+pad+'" style="'+thS+'"></th>' : '';
+      const padTd = pad > 0 ? '<td colspan="'+pad+'" style="border:1px solid #d1d5db;background:#fff8f8;"></td>' : '';
+      html += '<tr>' + r2.map(f=>'<th style="'+thS+'">'+f.label+'<br><span style="font-weight:400;font-size:9px;">'+f.en+'</span></th>').join('') + padTh + '</tr>';
+      html += '<tr style="background:#fff8f8;">' + r2.map(f=>'<td style="'+tdS+'">'+F(f.val)+'</td>').join('') + padTd + '</tr>';
+    }
+    html += '</table>';
+    return html;
+  }
+
+  return `
+  <div style="font-family:'Sarabun',sans-serif;background:#fff;padding:${compact?'12px':'24px'};max-width:${compact?'100%':'1000px'};margin:0 auto;font-size:12px;color:#1d1d1f;">
+
+    <!-- ===== HEADER ===== -->
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        ${(()=>{const logoEl=document.querySelector('#sidebar img[alt="2PS Logo"]');const src=logoEl?logoEl.src:'';return src?`<img src="${src}" alt="2PS Logo" style="width:${compact?'44px':'56px'};height:${compact?'44px':'56px'};object-fit:contain;border-radius:6px;flex-shrink:0;">`:'<div style="width:${compact?\'44px\':\'56px\'};height:${compact?\'44px\':\'56px\'};background:#1d4ed8;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;color:#fff;">2PS</div>';})()}
+        <div>
+          <div style="font-size:${compact?'14px':'17px'};font-weight:900;color:#1d4ed8;letter-spacing:.5px;">2PS SERVICE</div>
+          <div style="font-size:9px;color:#6b7280;margin-top:1px;">บริษัท 2PS เซอร์วิส จำกัด</div>
+        </div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:${compact?'18px':'26px'};font-weight:900;color:#1d1d1f;letter-spacing:4px;">PAY SLIP</div>
+        <div style="font-size:9px;color:#6b7280;">ใบแจ้งเงินเดือน / สลิปเงินเดือน</div>
+      </div>
+      <div style="border:1.5px solid #1d1d1f;padding:4px 14px;font-size:12px;font-weight:700;border-radius:4px;align-self:center;">ลับเฉพาะ</div>
+    </div>
+
+    <!-- ===== EMPLOYEE INFO ===== -->
+    <table style="width:100%;border-collapse:collapse;margin-bottom:0;table-layout:fixed;">
+      <tr style="background:#1d1d1f;color:#fff;text-align:center;">
+        <th style="padding:${P};font-size:10px;font-weight:600;border:1px solid #374151;width:12%;">รหัสพนักงาน<br><span style="font-weight:400;font-size:9px;">Emp. No.</span></th>
+        <th style="padding:${P};font-size:10px;font-weight:600;border:1px solid #374151;width:22%;">ชื่อ - นามสกุล<br><span style="font-weight:400;font-size:9px;">Name Surname</span></th>
+        <th style="padding:${P};font-size:10px;font-weight:600;border:1px solid #374151;width:25%;">ตำแหน่ง<br><span style="font-weight:400;font-size:9px;">Position</span></th>
+        <th style="padding:${P};font-size:10px;font-weight:600;border:1px solid #374151;width:15%;">แผนก<br><span style="font-weight:400;font-size:9px;">Division</span></th>
+        <th style="padding:${P};font-size:10px;font-weight:600;border:1px solid #374151;width:13%;">ฝ่าย<br><span style="font-weight:400;font-size:9px;">Department</span></th>
+        <th style="padding:${P};font-size:10px;font-weight:600;border:1px solid #374151;width:13%;">ประจำเดือน<br><span style="font-weight:400;font-size:9px;">Period</span></th>
+      </tr>
+      <tr style="text-align:center;">
+        <td style="padding:${P};border:1px solid #d1d5db;font-weight:700;">${d.emp.id||d.emp._key||'-'}</td>
+        <td style="padding:${P};border:1px solid #d1d5db;font-weight:700;">${d.emp.name||'-'}</td>
+        <td style="padding:${P};border:1px solid #d1d5db;font-size:10px;">${d.emp.position||d.emp.dept||'-'}</td>
+        <td style="padding:${P};border:1px solid #d1d5db;font-size:10px;">${d.emp.dept||'-'}</td>
+        <td style="padding:${P};border:1px solid #d1d5db;font-size:10px;">${dept.division||d.emp.dept||'-'}</td>
+        <td style="padding:${P};border:1px solid #d1d5db;font-weight:700;color:#1d4ed8;">${d.periodStr}</td>
+      </tr>
+    </table>
+
+    <!-- ===== INCOME SECTION ===== -->
+    <div style="display:flex;align-items:stretch;margin-top:0;">
+      <div style="display:flex;align-items:center;justify-content:center;width:20px;min-width:20px;border:1px solid #bfdbfe;border-right:none;background:#dbeafe;flex-shrink:0;">
+        <span style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;font-weight:700;color:#1e40af;letter-spacing:.15em;white-space:nowrap;">เงินได้</span>
+      </div>
+      <div style="flex:1;min-width:0;overflow:hidden;">
+        ${makeIncTable(INC_ALL)}
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:${compact?'100px':'120px'};min-width:${compact?'100px':'120px'};max-width:${compact?'100px':'120px'};border:2px solid #1d4ed8;background:#eff6ff;padding:8px;text-align:center;flex-shrink:0;box-sizing:border-box;">
+        <div style="font-size:10px;font-weight:700;color:#1e40af;line-height:1.4;">รวมเงินได้<br><span style="font-weight:400;">Total Income</span></div>
+        <div style="font-size:${compact?'12px':'14px'};font-weight:900;color:#1d4ed8;margin-top:4px;word-break:break-all;">${F(d.income)}</div>
+      </div>
+    </div>
+
+    <!-- ===== DEDUCTION SECTION ===== -->
+    <div style="display:flex;align-items:stretch;margin-top:0;">
+      <div style="display:flex;align-items:center;justify-content:center;width:20px;min-width:20px;border:1px solid #fecaca;border-right:none;background:#fee2e2;flex-shrink:0;">
+        <span style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;font-weight:700;color:#b91c1c;letter-spacing:.15em;white-space:nowrap;">เงินหัก</span>
+      </div>
+      <div style="flex:1;min-width:0;overflow:hidden;">
+        ${makeDedTable(DED_ALL)}
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:${compact?'100px':'120px'};min-width:${compact?'100px':'120px'};max-width:${compact?'100px':'120px'};border:2px solid #dc2626;background:#fff5f5;padding:8px;text-align:center;flex-shrink:0;box-sizing:border-box;">
+        <div style="font-size:10px;font-weight:700;color:#b91c1c;line-height:1.4;">รวมเงินหัก<br><span style="font-weight:400;">Total Deductions</span></div>
+        <div style="font-size:${compact?'12px':'14px'};font-weight:900;color:#dc2626;margin-top:4px;word-break:break-all;">${F(d.deduct)}</div>
+      </div>
+    </div>
+
+    <!-- ===== FOOTER SUMMARY ===== -->
+    <table style="width:100%;border-collapse:collapse;margin-top:0;table-layout:fixed;">
+      <colgroup>
+        <col/><col/><col/><col/>
+        <col style="width:${compact?'100px':'120px'};"/>
+      </colgroup>
+      <tr style="text-align:center;">
+        <th style="padding:${P};font-size:10px;font-weight:600;border:1px solid #d1d5db;background:#f3f4f6;color:#374151;">รายได้สะสม<br><span style="font-weight:400;font-size:9px;">Year Accu. Income</span></th>
+        <th style="padding:${P};font-size:10px;font-weight:600;border:1px solid #d1d5db;background:#f3f4f6;color:#374151;">ภาษีสะสม<br><span style="font-weight:400;font-size:9px;">Year Accu. TAX</span></th>
+        <th style="padding:${P};font-size:10px;font-weight:600;border:1px solid #d1d5db;background:#f3f4f6;color:#374151;">ปกส. สะสม<br><span style="font-weight:400;font-size:9px;">Year Accu. SOC.</span></th>
+        <th style="padding:${P};font-size:10px;font-weight:600;border:1px solid #d1d5db;background:#f3f4f6;color:#374151;">เลขที่บัญชี<br><span style="font-weight:400;font-size:9px;">Bank Account No.</span></th>
+        <th style="padding:${P};font-size:10px;font-weight:700;border:2px solid #15803d;background:#dcfce7;color:#15803d;">เงินได้สุทธิ<br><span style="font-size:9px;">Net Income</span></th>
+      </tr>
+      <tr style="text-align:center;">
+        <td style="padding:${P};border:1px solid #d1d5db;font-weight:600;color:#374151;">-</td>
+        <td style="padding:${P};border:1px solid #d1d5db;font-weight:600;color:#374151;">-</td>
+        <td style="padding:${P};border:1px solid #d1d5db;font-weight:600;color:#374151;">-</td>
+        <td style="padding:${P};border:1px solid #d1d5db;font-size:11px;color:#374151;">${d.emp.bankAccount||'-'}</td>
+        <td style="padding:${P};border:2px solid #15803d;background:#f0fdf4;font-size:${compact?'12px':'14px'};font-weight:900;color:#15803d;word-break:break-all;">${F(d.net)}</td>
+      </tr>
+    </table>
+
+    <div style="text-align:center;font-size:9px;color:#9ca3af;margin-top:8px;padding-top:6px;border-top:1px dashed #e5e7eb;">
+      Generated by 2PS SERVICE SYSTEM \xb7 ${new Date().toLocaleDateString('th-TH',{year:'numeric',month:'long',day:'numeric'})} \xb7 ลับเฉพาะ — ห้ามเผยแพร่
+    </div>
+  </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  FETCH & EDIT PAYSLIP — ดึงข้อมูลและแก้ไขสลิป
+// ══════════════════════════════════════════════════════════════════════
+
+// draft store: { empKey: { base, ot, bonus, food, incentive, travel, leader, phone, welfare, tax, sso, pf, absent, other, bankAccount } }
+window._slipDraft = {};
+
+const INC_KEYS = ['base','ot','bonus','food','incentive','travel','leader','phone','welfare'];
+const DED_KEYS = ['tax','sso','pf','absent','other'];
+const FIELD_LABEL = {
+  base:'เงินเดือน/ค่าแรง', ot:'OT Lump Sum', bonus:'โบนัส', food:'ค่าอาหาร',
+  incentive:'เบี้ยขยัน', travel:'ค่าเดินทาง', leader:'ค่าตำแหน่ง',
+  phone:'ค่าโทรศัพท์', welfare:'สวัสดิการอื่นๆ',
+  tax:'ภาษี', sso:'ประกันสังคม', pf:'กองทุนสำรองฯ',
+  absent:'ขาดงาน/ลาเกินสิทธิ', other:'เงินหักอื่นๆ',
+};
+
+window.fetchAndEditPayslip = async function() {
+  const ym = document.getElementById('ps-month')?.value;
+  if (!ym) { alert('กรุณาเลือกเดือนก่อน'); return; }
+  const empKey = document.getElementById('ps-emp')?.value;
+  const area = document.getElementById('ps-edit-table-area');
+  if (!area) return;
+
+  const btn = document.getElementById('fetch-slip-btn');
+  const origHTML = btn.innerHTML;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> กำลังดึงข้อมูล...';
+  btn.disabled = true;
+
+  try {
+    const keys = empKey ? [empKey] : db.employees.map(e => e._key);
+    const results = [];
+    for (const k of keys) {
+      const d = await getPayslipData(k, ym);
+      results.push(d);
+      // Seed draft if not already set
+      if (!window._slipDraft[k]) {
+        // ดึง bankAccount จาก db.employees ก่อนเสมอ (บันทึกถาวร)
+        const savedBank = db.employees.find(e => e._key === k)?.bankAccount || '';
+        window._slipDraft[k] = {
+          base:d.base, ot:d.ot, bonus:d.bonus, food:d.food,
+          incentive:d.incentive, travel:d.travel, leader:d.leader,
+          phone:d.phone, welfare:d.welfare,
+          tax:d.tax, sso:d.sso, pf:d.pf, absent:d.absent, other:d.other,
+          bankAccount: savedBank || d.emp.bankAccount || '',
+        };
+      } else {
+        // draft มีอยู่แล้ว แต่อัปเดต bankAccount จาก db เสมอ
+        const savedBank = db.employees.find(e => e._key === k)?.bankAccount || '';
+        if (savedBank) window._slipDraft[k].bankAccount = savedBank;
+      }
+    }
+    window._slipEditData = { ym, results };
+    renderSlipEditTable(results, ym);
+    area.style.display = 'block';
+    area.scrollIntoView({ behavior:'smooth', block:'start' });
+  } catch(e) {
+    alert('ดึงข้อมูลไม่สำเร็จ: ' + e.message);
+  } finally {
+    btn.innerHTML = origHTML;
+    btn.disabled = false;
+  }
+};
+
+function renderSlipEditTable(results, ym) {
+  const area = document.getElementById('ps-edit-table-area');
+  if (!area) return;
+  const [y, m] = ym.split('-');
+  const monthTH = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'][parseInt(m)-1];
+  const periodLabel = `${monthTH} ${parseInt(y)+543}`;
+
+  const incActive = INC_KEYS.filter(k => payslipFields.income[k]?.on);
+  const dedActive = DED_KEYS.filter(k => payslipFields.deduct[k]?.on);
+
+  const iS = 'width:100%;padding:5px 7px;border:1px solid #bfdbfe;border-radius:6px;font-size:12px;font-family:Sarabun,sans-serif;text-align:right;box-sizing:border-box;background:#fff;';
+  const dS = 'width:100%;padding:5px 7px;border:1px solid #fecaca;border-radius:6px;font-size:12px;font-family:Sarabun,sans-serif;text-align:right;box-sizing:border-box;background:#fff;';
+  const thI = 'padding:6px 8px;background:#dbeafe;border:1px solid #bfdbfe;font-size:10px;font-weight:700;color:#1e40af;text-align:center;';
+  const thD = 'padding:6px 8px;background:#fee2e2;border:1px solid #fecaca;font-size:10px;font-weight:700;color:#b91c1c;text-align:center;';
+
+  // Build one card per employee
+  const cards = results.map(d => {
+    const k = d.emp._key;
+    const dr = window._slipDraft[k] || {};
+
+    const incCols = incActive.map(fk => `<th style="${thI}">${FIELD_LABEL[fk]}</th>`).join('');
+    const incVals = incActive.map(fk => `
+      <td style="padding:4px 5px;border:1px solid #d1d5db;">
+        <input type="number" step="0.01" min="0" value="${(dr[fk]||0).toFixed(2)}"
+          onchange="slipDraftUpdate('${k}','${fk}',+this.value)"
+          style="${iS}">
+      </td>`).join('');
+
+    const dedCols = dedActive.map(fk => `<th style="${thD}">${FIELD_LABEL[fk]}</th>`).join('');
+    const dedVals = dedActive.map(fk => `
+      <td style="padding:4px 5px;border:1px solid #d1d5db;">
+        <input type="number" step="0.01" min="0" value="${(dr[fk]||0).toFixed(2)}"
+          onchange="slipDraftUpdate('${k}','${fk}',+this.value)"
+          style="${dS}">
+      </td>`).join('');
+
+    return `
+    <div id="slip-card-${k}" style="background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;margin-bottom:14px;">
+      <!-- Employee name bar -->
+      <div style="padding:8px 14px;background:#1d1d1f;color:#fff;display:flex;align-items:center;gap:10px;">
+        <div style="width:28px;height:28px;border-radius:50%;background:#0071e3;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">${(d.emp.name||'?').charAt(0)}</div>
+        <div style="flex:1;">
+          <div style="font-size:13px;font-weight:700;">${d.emp.name||k}</div>
+          <div style="font-size:10px;color:#9ca3af;">${d.emp.position||d.emp.dept||'-'} · ${d.emp._key||''}</div>
+        </div>
+        <div style="font-size:10px;color:#9ca3af;">${periodLabel}</div>
+      </div>
+
+      <div style="padding:10px 12px;display:flex;flex-direction:column;gap:0;">
+
+        <!-- Row 1: เงินได้ -->
+        <div style="overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;table-layout:auto;min-width:max-content;">
+            <thead>
+              <tr>
+                <th colspan="${incActive.length}" style="padding:5px 8px;background:#1d4ed8;border:1px solid #1e40af;color:#fff;font-size:10px;font-weight:700;text-align:left;">
+                  <i class="fas fa-plus-circle" style="margin-right:5px;"></i>เงินได้ (Income)
+                </th>
+              </tr>
+              <tr>${incCols}</tr>
+            </thead>
+            <tbody><tr style="background:#f5f8ff;">${incVals}</tr></tbody>
+          </table>
+        </div>
+
+        <!-- Row 2: เงินหัก -->
+        <div style="overflow-x:auto;margin-top:6px;">
+          <table style="width:100%;border-collapse:collapse;table-layout:auto;min-width:max-content;">
+            <thead>
+              <tr>
+                <th colspan="${dedActive.length}" style="padding:5px 8px;background:#dc2626;border:1px solid #b91c1c;color:#fff;font-size:10px;font-weight:700;text-align:left;">
+                  <i class="fas fa-minus-circle" style="margin-right:5px;"></i>เงินหัก (Deductions)
+                </th>
+              </tr>
+              <tr>${dedCols}</tr>
+            </thead>
+            <tbody><tr style="background:#fff8f8;">${dedVals}</tr></tbody>
+          </table>
+        </div>
+
+        <!-- Row 3: รวม + สุทธิ + บัญชี -->
+        <div style="margin-top:6px;display:flex;gap:8px;align-items:stretch;flex-wrap:wrap;">
+          <div style="flex:1;min-width:110px;padding:8px 10px;background:#eff6ff;border:1.5px solid #1d4ed8;border-radius:10px;text-align:center;">
+            <div style="font-size:9px;font-weight:700;color:#1e40af;">รวมเงินได้</div>
+            <div style="font-size:14px;font-weight:900;color:#1d4ed8;margin-top:2px;" id="slip-total-inc-${k}">${calcSlipTotal(k,'inc')}</div>
+          </div>
+          <div style="flex:1;min-width:110px;padding:8px 10px;background:#fff5f5;border:1.5px solid #dc2626;border-radius:10px;text-align:center;">
+            <div style="font-size:9px;font-weight:700;color:#b91c1c;">รวมเงินหัก</div>
+            <div style="font-size:14px;font-weight:900;color:#dc2626;margin-top:2px;" id="slip-total-ded-${k}">${calcSlipTotal(k,'ded')}</div>
+          </div>
+          <div style="flex:1.5;min-width:130px;padding:8px 10px;background:#f0fdf4;border:2px solid #15803d;border-radius:10px;text-align:center;">
+            <div style="font-size:9px;font-weight:700;color:#15803d;">เงินได้สุทธิ / Net Income</div>
+            <div style="font-size:16px;font-weight:900;color:#15803d;margin-top:2px;" id="slip-total-net-${k}">${calcSlipTotal(k,'net')}</div>
+          </div>
+          <div style="flex:2;min-width:160px;padding:6px 10px;background:#f9fafb;border:1px solid #d1d5db;border-radius:10px;display:flex;flex-direction:column;justify-content:center;">
+            <div style="font-size:9px;font-weight:700;color:#374151;margin-bottom:4px;">เลขที่บัญชีธนาคาร</div>
+            <input type="text" value="${dr.bankAccount||''}"
+              onchange="slipDraftUpdate('${k}','bankAccount',this.value)"
+              style="width:100%;padding:5px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;font-family:Sarabun,sans-serif;box-sizing:border-box;background:#fff;"
+              placeholder="กรอกเลขที่บัญชี">
+          </div>
+        </div>
+
+      </div>
+    </div>`;
+  }).join('');
+
+  area.innerHTML = `
+    <div style="background:#f5f5f7;border-radius:18px;padding:16px;box-shadow:0 1px 4px rgba(0,0,0,.07),0 0 0 1px rgba(0,0,0,.05);">
+      <!-- Header bar -->
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="width:32px;height:32px;border-radius:10px;background:rgba(0,113,227,.1);display:flex;align-items:center;justify-content:center;">
+            <i class="fas fa-table" style="font-size:13px;color:#0071e3;"></i>
+          </div>
+          <div>
+            <div style="font-size:14px;font-weight:700;color:#1d1d1f;">แก้ไขสลิปเงินเดือน</div>
+            <div style="font-size:11px;color:#86868b;">ประจำเดือน ${periodLabel} · ${results.length} พนักงาน</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button onclick="applyDraftToImported('${ym}')"
+            style="padding:8px 16px;background:#0071e3;color:#fff;border:none;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px;">
+            <i class="fas fa-check"></i> ยืนยันใช้ข้อมูลชุดนี้
+          </button>
+          <button onclick="resetSlipDraft('${ym}')"
+            style="padding:8px 16px;background:#fff;color:#1d1d1f;border:1px solid #d1d5db;border-radius:10px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px;">
+            <i class="fas fa-undo"></i> รีเซ็ต
+          </button>
+        </div>
+      </div>
+
+      <!-- Info banner -->
+      <div style="padding:8px 14px;background:#fffbeb;border:1px solid #fef3c7;border-radius:10px;font-size:11px;color:#92400e;display:flex;align-items:center;gap:6px;margin-bottom:14px;">
+        <i class="fas fa-lightbulb" style="color:#d97706;"></i>
+        แก้ไขตัวเลขได้โดยตรงในทุกช่อง · ยอดรวมคำนวณอัตโนมัติ · กด <strong>"ยืนยันใช้ข้อมูลชุดนี้"</strong> เพื่อใช้ออก PDF
+      </div>
+
+      ${cards}
+    </div>`;
+}
+
+function calcSlipTotal(empKey, type) {
+  const dr = window._slipDraft[empKey] || {};
+  const incActive = INC_KEYS.filter(k => payslipFields.income[k]?.on);
+  const dedActive = DED_KEYS.filter(k => payslipFields.deduct[k]?.on);
+  const F = v => (v||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2});
+  if (type === 'inc') return F(incActive.reduce((s,k) => s+(dr[k]||0), 0));
+  if (type === 'ded') return F(dedActive.reduce((s,k) => s+(dr[k]||0), 0));
+  const inc = incActive.reduce((s,k) => s+(dr[k]||0), 0);
+  const ded = dedActive.reduce((s,k) => s+(dr[k]||0), 0);
+  return F(inc - ded);
+}
+
+window.slipDraftUpdate = function(empKey, field, val) {
+  if (!window._slipDraft[empKey]) window._slipDraft[empKey] = {};
+  window._slipDraft[empKey][field] = val;
+
+  // ── ถ้าเป็นเลขบัญชี → บันทึกถาวรลง Firebase + db local ทันที ──
+  if (field === 'bankAccount') {
+    const emp = db.employees.find(e => e._key === empKey);
+    if (emp) emp.bankAccount = val;          // อัปเดต local ทันที
+    fbPatch('/employees/' + empKey, { bankAccount: val })
+      .then(() => {
+        // แสดง flash "บันทึกแล้ว" ข้างช่อง input
+        const input = document.querySelector(`input[onchange*="'${empKey}','bankAccount'"]`);
+        if (!input) return;
+        const orig = input.style.borderColor;
+        input.style.borderColor = '#15803d';
+        input.style.background  = '#f0fdf4';
+        const tip = document.createElement('span');
+        tip.textContent = '✓ บันทึกแล้ว';
+        tip.style.cssText = 'font-size:10px;color:#15803d;font-family:Sarabun,sans-serif;margin-left:4px;';
+        input.parentNode.appendChild(tip);
+        setTimeout(() => {
+          input.style.borderColor = orig;
+          input.style.background  = '#fff';
+          tip.remove();
+        }, 2000);
+      })
+      .catch(() => {});
+  }
+
+  // Refresh totals
+  const iEl = document.getElementById('slip-total-inc-'+empKey);
+  const dEl = document.getElementById('slip-total-ded-'+empKey);
+  const nEl = document.getElementById('slip-total-net-'+empKey);
+  if (iEl) iEl.textContent = calcSlipTotal(empKey,'inc');
+  if (dEl) dEl.textContent = calcSlipTotal(empKey,'ded');
+  if (nEl) nEl.textContent = calcSlipTotal(empKey,'net');
+};
+
+window.applyDraftToImported = function(ym) {
+  if (!window._slipEditData) return;
+  const { results } = window._slipEditData;
+  if (!window._importedPayslip) window._importedPayslip = {};
+  if (!window._importedPayslip[ym]) window._importedPayslip[ym] = {};
+  results.forEach(d => {
+    const k = d.emp._key;
+    const dr = window._slipDraft[k] || {};
+    window._importedPayslip[ym][k] = {
+      ...dr,
+      name: d.emp.name||'',
+      dept: d.emp.dept||'',
+      position: d.emp.position||'',
+    };
+    // Also patch the employee bankAccount live
+    if (dr.bankAccount) d.emp.bankAccount = dr.bankAccount;
+  });
+  // Flash confirm
+  const btn = event.target.closest('button');
+  const orig = btn.innerHTML;
+  btn.innerHTML = '<i class="fas fa-check-circle"></i> บันทึกแล้ว!';
+  btn.style.background = '#30d158';
+  setTimeout(() => { btn.innerHTML = orig; btn.style.background = '#0071e3'; }, 2000);
+};
+
+window.resetSlipDraft = async function(ym) {
+  if (!window._slipEditData) return;
+  const { results } = window._slipEditData;
+  // Clear drafts and re-fetch
+  results.forEach(d => { delete window._slipDraft[d.emp._key]; });
+  await fetchAndEditPayslip();
+};
+
+window.previewPayslip = async function() {
+  const empKey = document.getElementById('ps-emp')?.value;
+  const ym     = document.getElementById('ps-month')?.value;
+  if (!ym) return;
+  const area = document.getElementById('ps-preview-area');
+  if (!area) return;
+  area.style.display = 'block';
+  area.innerHTML = `<div style="background:#fff;border-radius:18px;padding:20px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.07);">
+    <div class="loading-spinner" style="width:28px;height:28px;border-width:3px;margin:0 auto 8px;"></div>
+    <div style="font-size:13px;color:#86868b;">กำลังโหลดข้อมูล...</div></div>`;
+
+  const keys = empKey ? [empKey] : db.employees.map(e=>e._key);
+  const previews = [];
+  for (const k of keys.slice(0,3)) {
+    const d = await getPayslipData(k, ym);
+    previews.push(d);
+  }
+  const more = keys.length > 3 ? `<div style="text-align:center;padding:12px;font-size:12px;color:#86868b;">... และอีก ${keys.length-3} คน (Download PDF เพื่อดูทั้งหมด)</div>` : '';
+  area.innerHTML = `
+    <div style="background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.07);">
+      <div style="padding:14px 20px;border-bottom:1px solid #f0f0f5;display:flex;align-items:center;gap:8px;">
+        <i class="fas fa-eye" style="color:#86868b;font-size:13px;"></i>
+        <span style="font-size:13px;font-weight:600;color:#1d1d1f;">ตัวอย่างสลิป — ${previews[0]?.periodStr||ym}</span>
+        <span style="font-size:11px;color:#86868b;margin-left:4px;">(แสดง ${previews.length} จาก ${keys.length} คน)</span>
+      </div>
+      <div style="padding:16px;overflow-x:auto;">
+        ${previews.map(d=>buildPayslipHTML(d,true)).join('<hr style="border:none;border-top:2px dashed #e5e5ea;margin:20px 0;">')}
+        ${more}
+      </div>
+    </div>`;
+};
+
+window.downloadPayslipPDF = async function() {
+  const empKey = document.getElementById('ps-emp')?.value;
+  const ym     = document.getElementById('ps-month')?.value;
+  if (!ym) { alert('กรุณาเลือกเดือนก่อน'); return; }
+
+  const btn = event.target.closest('button');
+  const orig = btn.innerHTML;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> กำลังสร้าง PDF...';
+  btn.disabled = true;
+
+  const keys = empKey ? [empKey] : db.employees.map(e=>e._key);
+  const allData = [];
+  for (const k of keys) {
+    const d = await getPayslipData(k, ym);
+    allData.push(d);
+  }
+
+  // Build filename: ถ้า 1 คน → "ชื่อพนักงาน_เดือนปี"  ถ้าหลายคน → "สลิปเงินเดือน_เดือนปี"
+  const MONTHS_TH_FULL = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+  const [_y, _m] = ym.split('-');
+  const periodLabel = MONTHS_TH_FULL[parseInt(_m)-1] + '_' + (parseInt(_y)+543);
+  const docTitle = allData.length === 1
+    ? (allData[0].emp.name || allData[0].emp._key || 'พนักงาน') + '_' + periodLabel
+    : 'สลิปเงินเดือน_' + periodLabel;
+
+  // Render HTML to print window
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <title>${docTitle}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+    <style>
+      *{box-sizing:border-box;margin:0;padding:0;}
+      body{font-family:'Sarabun',sans-serif;background:#fff;}
+      @page{size:A4 landscape;margin:10mm 12mm;}
+      @media print{
+        body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+        .page-break{page-break-before:always;}
+        .slip-wrap{max-width:100%!important;width:100%!important;padding:0!important;}
+      }
+      .slip-wrap{max-width:100%;width:100%;}
+    </style>
+  </head><body>
+    ${allData.map((d,i)=>`
+      ${i>0?'<div class="page-break"></div>':''}
+      <div class="slip-wrap">${buildPayslipHTML(d,false)}</div>
+    `).join('')}
+  </body></html>`;
+
+  const win = window.open('','_blank','width=900,height=700');
+  if (!win) { alert('กรุณาอนุญาต popup แล้วลองใหม่'); btn.innerHTML=orig; btn.disabled=false; return; }
+  win.document.write(html);
+  win.document.close();
+  win.onload = () => { win.focus(); win.print(); };
+
+  btn.innerHTML = '<i class="fas fa-check"></i> เปิด PDF แล้ว!';
+  btn.style.background = '#30d158';
+  setTimeout(() => { btn.innerHTML=orig; btn.style.background='#1d1d1f'; btn.disabled=false; }, 3000);
+};
+
+window.downloadPayslipTemplate = function() {
+  const headers = ['emp_id','emp_name','position','dept','period_th','period','base','ot_lump_sum','bonus',
+    'food_allowance','incentive_allowance','travelling_allowance','team_leader','mobile_allowance','other_welfare',
+    'tax','social_security','provident_fund','absent_deduct','other_deduct','bank_account'];
+  const headersTH = ['รหัสพนักงาน','ชื่อ-นามสกุล','ตำแหน่ง','แผนก','งวดประจำเดือน(ไทย)','งวดประจำเดือน(YYYY-MM)','เงินเดือน',
+    'OT Lump Sum','โบนัส','ค่าอาหาร','เบี้ยขยัน','ค่าเดินทาง','ค่าตำแหน่ง','ค่าโทรศัพท์','สวัสดิการอื่นๆ',
+    'ภาษี','ประกันสังคม','กองทุนสำรองฯ','หักขาดงาน','หักอื่นๆ','เลขที่บัญชี'];
+  const MONTHS_TH = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+  const wb = XLSX.utils.book_new();
+  // Use actual employees if available, else use sample
+  const employees = (db.employees && db.employees.length > 0) ? db.employees : [
+    {_key:'610716001', name:'นรดล วันภักดี', position:'ปฏิบัติการ', dept:'ปฏิบัติการ', bankAccount:'6534236789'}
+  ];
+  const curYear = new Date().getFullYear();
+  employees.forEach(emp => {
+    const rows = [headers, headersTH];
+    for (let m = 1; m <= 12; m++) {
+      const mm = String(m).padStart(2,'0');
+      const periodTH = `${MONTHS_TH[m-1]} ${curYear+543}`;
+      const period = `${curYear}-${mm}`;
+      rows.push([emp._key||'', emp.name||'', emp.position||'', emp.dept||'', periodTH, period,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0, emp.bankAccount||'']);
+    }
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    // Column widths
+    ws['!cols'] = [{wch:14},{wch:20},{wch:22},{wch:16},{wch:18},{wch:14},
+      {wch:11},{wch:11},{wch:9},{wch:10},{wch:10},{wch:11},{wch:11},{wch:11},{wch:12},
+      {wch:9},{wch:12},{wch:14},{wch:11},{wch:10},{wch:16}];
+    // Safe sheet name (max 31 chars, no special chars)
+    const sheetName = (emp.name||emp._key||'emp').replace(/[\/*?:\[\]]/g,'').slice(0,28) || 'Employee';
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  });
+  XLSX.writeFile(wb, `payslip_template_${curYear}.xlsx`);
+};
+
+window.handlePayslipDrop = function(e) {
+  e.preventDefault();
+  const zone = document.getElementById('ps-upload-zone');
+  if (zone) { zone.style.borderColor='#d1d1d6'; zone.style.background='#fafafa'; }
+  const file = e.dataTransfer?.files?.[0];
+  if (file) processPayslipFile(file);
+};
+
+window.handlePayslipUpload = function(input) {
+  const file = input.files?.[0];
+  if (file) processPayslipFile(file);
+};
+
+// Imported payslip data store: { 'YYYY-MM': { empKey: {fields...} } }
+window._importedPayslip = {};
+
+function processPayslipFile(file) {
+  const result = document.getElementById('ps-upload-result');
+  if (!result) return;
+  result.style.display = 'block';
+  result.innerHTML = `<div style="padding:12px 14px;background:#f5f5f7;border-radius:10px;font-size:13px;color:#86868b;">
+    <i class="fas fa-spinner fa-spin" style="margin-right:6px;"></i>กำลังอ่านไฟล์ <strong>${file.name}</strong>...</div>`;
+
+  const isXlsx = file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls');
+  const reader = new FileReader();
+
+  reader.onload = function(ev) {
+    try {
+      let allData = []; // [{sheetName, rows:[{...}]}]
+
+      if (isXlsx) {
+        const wb = XLSX.read(ev.target.result, { type: 'array' });
+        wb.SheetNames.forEach(sName => {
+          const ws = wb.Sheets[sName];
+          const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+          if (raw.length < 3) return;
+          // Find header row (row 0 = machine headers, row 1 = Thai headers — data starts row 2)
+          const headers = raw[0].map(h => String(h).trim());
+          const rows = raw.slice(2).filter(r => r.some(c => c !== '')).map(r =>
+            Object.fromEntries(headers.map((h, i) => [h, String(r[i]||'').trim()]))
+          );
+          if (rows.length) allData.push({ sheetName: sName, rows });
+        });
+      } else {
+        // CSV
+        const text = ev.target.result;
+        const lines = text.split('\n').filter(r => r.trim());
+        const headers = lines[0].split(',').map(h => h.trim().replace(/^\uFEFF/, ''));
+        const rows = lines.slice(1).map(r => Object.fromEntries(r.split(',').map((v, i) => [headers[i], (v||'').trim()])));
+        allData = [{ sheetName: 'CSV', rows }];
+      }
+
+      // ─── Store into _importedPayslip ──────────────────────────────
+      window._importedPayslip = {};
+      let totalRows = 0;
+      allData.forEach(({ rows }) => {
+        rows.forEach(row => {
+          const period = (row['period'] || '').trim();
+          const empId  = (row['emp_id'] || '').trim();
+          if (!period || !empId) return;
+          if (!window._importedPayslip[period]) window._importedPayslip[period] = {};
+          window._importedPayslip[period][empId] = {
+            base:      parseFloat(row['base']||0),
+            ot:        parseFloat(row['ot_lump_sum']||0),
+            bonus:     parseFloat(row['bonus']||0),
+            food:      parseFloat(row['food_allowance']||0),
+            incentive: parseFloat(row['incentive_allowance']||0),
+            travel:    parseFloat(row['travelling_allowance']||0),
+            leader:    parseFloat(row['team_leader']||0),
+            phone:     parseFloat(row['mobile_allowance']||0),
+            welfare:   parseFloat(row['other_welfare']||0),
+            tax:       parseFloat(row['tax']||0),
+            sso:       parseFloat(row['social_security']||0),
+            pf:        parseFloat(row['provident_fund']||0),
+            absent:    parseFloat(row['absent_deduct']||0),
+            other:     parseFloat(row['other_deduct']||0),
+            bankAccount: row['bank_account']||'',
+            name:      row['emp_name']||'',
+            dept:      row['dept']||'',
+            position:  row['position']||'',
+          };
+          totalRows++;
+        });
+      });
+
+      const sheets = allData.map(s => s.sheetName);
+      const periods = Object.keys(window._importedPayslip).sort();
+      result.innerHTML = `
+        <div style="padding:12px 14px;background:#f0fdf4;border-radius:10px;border:1px solid rgba(48,209,88,.3);">
+          <div style="font-size:13px;font-weight:600;color:#248a3d;margin-bottom:10px;">
+            <i class="fas fa-check-circle" style="margin-right:6px;"></i>
+            อ่านไฟล์สำเร็จ — <strong>${allData.length} sheet</strong> · <strong>${totalRows} แถว</strong>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;">
+            ${sheets.map(s=>`<span style="padding:2px 8px;background:#dcfce7;border-radius:20px;font-size:10px;font-weight:600;color:#166534;">${s}</span>`).join('')}
+          </div>
+          <div style="font-size:11px;color:#374151;margin-bottom:4px;">งวดที่พบ: ${periods.map(p=>`<span style="padding:1px 6px;background:#dbeafe;border-radius:10px;font-size:10px;color:#1e40af;">${p}</span>`).join(' ')}</div>
+          <div style="font-size:11px;color:#86868b;margin-top:8px;">
+            <i class="fas fa-info-circle" style="color:#0071e3;margin-right:4px;"></i>
+            ข้อมูลพร้อมใช้งาน — เลือกเดือนแล้วกด "ดูตัวอย่าง" หรือ "Download PDF"
+          </div>
+        </div>`;
+    } catch(err) {
+      result.innerHTML = `<div style="padding:12px 14px;background:#fff5f5;border-radius:10px;border:1px solid rgba(255,59,48,.2);font-size:13px;color:#d70015;">
+        <i class="fas fa-exclamation-circle" style="margin-right:6px;"></i>ไม่สามารถอ่านไฟล์ได้: ${err.message}</div>`;
+    }
+  };
+
+  if (isXlsx) reader.readAsArrayBuffer(file);
+  else reader.readAsText(file, 'UTF-8');
+}
+
+// ─── Payslip month picker helpers ──────────────────────────────────────────
+(function(){
+  let _psYear = new Date().getFullYear();
+  const MONTHS_TH = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+  window.psChangeYear = function(delta) {
+    _psYear += delta;
+    const lbl = document.getElementById('ps-year-label');
+    if (lbl) lbl.textContent = (_psYear+543)+' ('+_psYear+')';
+    // Update hidden input to reflect new year with current selected month
+    const hidden = document.getElementById('ps-month');
+    if (hidden) {
+      const curMM = hidden.value.slice(5,7) || String(new Date().getMonth()+1).padStart(2,'0');
+      hidden.value = _psYear+'-'+curMM;
+    }
+  };
+  window.psSelectMonth = function(mm) {
+    // Deactivate all
+    for (let i=1; i<=12; i++) {
+      const btn = document.getElementById('psmb-'+String(i).padStart(2,'0'));
+      if (!btn) continue;
+      btn.style.background = '#f5f5f7';
+      btn.style.color = '#1d1d1f';
+      btn.style.borderColor = '#e5e5ea';
+      btn.style.fontWeight = '500';
+    }
+    // Activate selected
+    const sel = document.getElementById('psmb-'+mm);
+    if (sel) {
+      sel.style.background = '#0071e3';
+      sel.style.color = '#fff';
+      sel.style.borderColor = '#0071e3';
+      sel.style.fontWeight = '700';
+    }
+    const hidden = document.getElementById('ps-month');
+    if (hidden) hidden.value = _psYear+'-'+mm;
+  };
+  // Patch getPayslipData to use imported data when available
+  const _origGetPayslipData = window._getPayslipData_orig || null;
+  window._patchGetPayslipData = function() {
+    const orig = getPayslipData;
+    window._getPayslipData_orig = orig;
+    getPayslipData = async function(empKey, ym) {
+      const imp = (window._importedPayslip||{})[ym];
+      if (imp) {
+        // Try match by emp_id or emp key
+        const empData = imp[empKey] || Object.values(imp).find(r=>r.name && db.employees.find(e=>e._key===empKey)?.name===r.name);
+        if (empData) {
+          const emp = db.employees.find(e=>e._key===empKey) || {};
+          if (empData.bankAccount) emp.bankAccount = empData.bankAccount;
+          const base=empData.base||0, ot=empData.ot||0, bonus=empData.bonus||0, food=empData.food||0;
+          const incentive=empData.incentive||0, travel=empData.travel||0, leader=empData.leader||0;
+          const phone=empData.phone||0, welfare=empData.welfare||0;
+          const tax=empData.tax||0, sso=empData.sso||0, pf=empData.pf||0;
+          const absent=empData.absent||0, other=empData.other||0;
+          const income = ['base','ot','bonus','food','incentive','travel','leader','phone','welfare']
+            .filter(k=>payslipFields.income[k]?.on)
+            .reduce((s,k)=>s+({base,ot,bonus,food,incentive,travel,leader,phone,welfare}[k]||0),0);
+          const deduct = ['tax','sso','pf','absent','other']
+            .filter(k=>payslipFields.deduct[k]?.on)
+            .reduce((s,k)=>s+({tax,sso,pf,absent,other}[k]||0),0);
+          const [y,m] = ym.split('-');
+          const monthTH = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'][parseInt(m)-1];
+          return {emp, sup:{}, recs:[], base, ot, otHours:0, bonus, food, incentive, travel, leader, phone, welfare,
+                  tax, sso, pf, absent, other, income, deduct, net:income-deduct,
+                  periodStr:monthTH+' '+(parseInt(y)+543), ym};
+        }
+      }
+      return orig(empKey, ym);
+    };
+  };
+})();
+
 window.onload=()=>{
+  window._patchGetPayslipData && window._patchGetPayslipData();
   // โหลด remember me จาก localStorage
   try{
     const saved=JSON.parse(localStorage.getItem('2ps_remember')||'null');
